@@ -14,7 +14,10 @@ from typing import Any, Iterable
 import re
 import zipfile
 from xml.etree import ElementTree as ET
-from xml.sax.saxutils import escape
+
+def escape(value: str) -> str:
+    """Escape text safely for XLSX XML without importing xml.sax."""
+    return (str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
 
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 DOCREL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -98,7 +101,42 @@ LINE_HEADERS = {
     "carryover_2": "Emeacarryoverseason2",
     "carryover_1": "Emeacarryoverseason1",
     "catalog_copy": "Product Catalog Copy",
+    "hero_look_name": "Hero Look Name",
 }
+# Hero Look Name is deliberately optional in case UA removes or renames the
+# field in a later season. In that case, GHL safely defaults to NE and the
+# audit records the missing commercial field.
+LINE_REQUIRED_HEADERS = tuple(
+    header for key, header in LINE_HEADERS.items() if key != "hero_look_name"
+)
+
+# Centric Brands files are separate licensed-product master data.  Their material
+# codes can be either standard UA codes (via UA Full Article Code) or Centric
+# codes such as 25UJFJM07F-001-JPC.  The builder deliberately does not match
+# them to the generic UA Material Data Report.
+CENTRIC_HEADERS = {
+    "division": "Division Name",
+    "brand": "Brand Description",
+    "range": "Range Segment",
+    "gender": "Gender Description",
+    "age_group": "Age Group Description",
+    "category": "Product Category Description",
+    "material_number": "Material Number",
+    "description": "Material Description",
+    "ua_style": "UA Style Code",
+    "ua_color": "UA Colour Code",
+    "ua_article": "UA Full Article Code",
+    "ean": ("EAN Number", "UPC Number"),
+    "size": "Size",
+    "season": "Season",
+    "color": "Color Description",
+    "country": "Country of Origin for PO",
+    "hts": ("Commodity Code", "HTS Code"),
+    "material": "Fibre Composition",
+    "fedas": "FEDAS Code",
+    "fedas_size": "FEDAS Size Code",
+}
+
 
 
 def norm(value: Any) -> str:
@@ -389,30 +427,47 @@ def _scope_style_sizes(scope_records: list[dict[str, Any]]) -> dict[str, list[st
     """Create Size Scale fallbacks from the complete active seasonal scope."""
     grouped: dict[str, list[str]] = defaultdict(list)
     for record in scope_records:
-        material = record.get("material")
-        oob = record.get("oob")
-        article = clean(material.get(MATERIAL_HEADERS["article"])) if material else clean(oob.get(OOB_HEADERS["article"])) if oob else ""
-        size = clean(material.get(MATERIAL_HEADERS["size"])) if material else clean(oob.get(OOB_HEADERS["size"])) if oob else ""
+        article = _scope_article(record)
+        size = _scope_size(record)
         if article and size:
-            grouped[_style_from_article(article)].append(size)
+            grouped[_scope_style(record)].append(size)
     return grouped
 
 
+def _scope_style(record: dict[str, Any]) -> str:
+    centric = record.get("centric")
+    material = record.get("material")
+    if centric:
+        return clean(centric.get("style"))
+    if material:
+        return clean(material.get(MATERIAL_HEADERS["style"]))
+    return _style_from_article(_scope_article(record))
+
+
 def _scope_article(record: dict[str, Any]) -> str:
+    centric = record.get("centric")
     material = record.get("material")
     oob = record.get("oob")
+    if centric:
+        return clean(centric.get("article"))
     return clean(material.get(MATERIAL_HEADERS["article"])) if material else clean(oob.get(OOB_HEADERS["article"])) if oob else ""
 
 
 def _scope_ean(record: dict[str, Any]) -> str:
+    centric = record.get("centric")
     material = record.get("material")
     oob = record.get("oob")
+    if centric:
+        return clean(centric.get("ean"))
     return clean(material.get(MATERIAL_HEADERS["ean"])) if material else clean(oob.get(OOB_HEADERS["ean"])) if oob else ""
 
 
 def _scope_size(record: dict[str, Any]) -> str:
+    centric = record.get("centric")
     material = record.get("material")
     oob = record.get("oob")
+    if centric:
+        return clean(centric.get("size"))
     return clean(material.get(MATERIAL_HEADERS["size"])) if material else clean(oob.get(OOB_HEADERS["size"])) if oob else ""
 
 
@@ -422,12 +477,139 @@ def _is_summary_row(row: dict[str, str], identifier_headers: Iterable[str]) -> b
     return any(norm(row.get(header)) in total_labels for header in identifier_headers)
 
 
+def _centric_value(row: dict[str, str], header: str | tuple[str, ...]) -> str:
+    if isinstance(header, tuple):
+        for candidate in header:
+            value = clean(row.get(candidate))
+            if value:
+                return value
+        return ""
+    return clean(row.get(header))
+
+
+def _centric_article_and_style(row: dict[str, str]) -> tuple[str, str]:
+    """Return customer-facing article/style while retaining the raw Centric code.
+
+    Examples:
+    - UA Full Article Code 6011474-001 remains 6011474-001
+    - 25UJFJM07F-001-JPC becomes article 25UJFJM07F-001, style 25UJFJM07F
+    """
+    supplied_article = _centric_value(row, CENTRIC_HEADERS["ua_article"])
+    material_number = _centric_value(row, CENTRIC_HEADERS["material_number"])
+    supplied_style = _centric_value(row, CENTRIC_HEADERS["ua_style"])
+    supplied_color = _centric_value(row, CENTRIC_HEADERS["ua_color"])
+    valid_style = supplied_style and norm(supplied_style) not in {"N/A", "NA", "TBC"}
+    valid_color = supplied_color and norm(supplied_color) not in {"N/A", "NA", "TBC"}
+    article = supplied_article
+    if not article or norm(article) in {"N/A", "NA", "TBC"}:
+        # Boys underwear often omits UA Full Article Code but supplies the
+        # standard UA style and colour code. Prefer that canonical article so
+        # it replaces the erroneous generic-UA master-data record.
+        if valid_style and valid_color:
+            article = f"{supplied_style}-{supplied_color}"
+        else:
+            parts = material_number.split("-")
+            article = "-".join(parts[:-1]) if len(parts) >= 3 else material_number
+    if valid_style:
+        style = supplied_style
+    else:
+        style = article.rsplit("-", 1)[0] if "-" in article else article
+    return clean(article), clean(style)
+
+
+def _centric_ean(row: dict[str, str]) -> str:
+    return _centric_value(row, CENTRIC_HEADERS["ean"])
+
+
+def _valid_ean(value: str) -> bool:
+    text = clean(value).replace(" ", "")
+    return text.isdigit() and 8 <= len(text) <= 14
+
+
+def _centric_record(row: dict[str, str], source: str) -> dict[str, str]:
+    article, style = _centric_article_and_style(row)
+    return {
+        "article": article,
+        "style": style,
+        "ean": _centric_ean(row),
+        "size": _centric_value(row, CENTRIC_HEADERS["size"]),
+        "source": source,
+        "raw_material_number": _centric_value(row, CENTRIC_HEADERS["material_number"]),
+        "description": _centric_value(row, CENTRIC_HEADERS["description"]),
+        "division": _centric_value(row, CENTRIC_HEADERS["division"]),
+        "gender": _centric_value(row, CENTRIC_HEADERS["gender"]),
+        "size_group": _centric_value(row, CENTRIC_HEADERS["age_group"]),
+        "end_use": _centric_value(row, CENTRIC_HEADERS["category"]),
+        "season": _centric_value(row, CENTRIC_HEADERS["season"]),
+        "color": _centric_value(row, CENTRIC_HEADERS["color"]),
+        "country": _centric_value(row, CENTRIC_HEADERS["country"]),
+        "hts": _centric_value(row, CENTRIC_HEADERS["hts"]),
+        "material": _centric_value(row, CENTRIC_HEADERS["material"]),
+        "fedas": _centric_value(row, CENTRIC_HEADERS["fedas"]),
+        "fedas_size": _centric_value(row, CENTRIC_HEADERS["fedas_size"]),
+    }
+
+
+def _centric_rows(
+    records: list[dict[str, str]],
+    source: str,
+    issues: list[dict[str, str]],
+    counters: Counter,
+) -> list[dict[str, str]]:
+    required = [
+        CENTRIC_HEADERS["division"], CENTRIC_HEADERS["range"], CENTRIC_HEADERS["gender"],
+        CENTRIC_HEADERS["age_group"], CENTRIC_HEADERS["category"], CENTRIC_HEADERS["material_number"],
+        CENTRIC_HEADERS["description"], CENTRIC_HEADERS["size"], CENTRIC_HEADERS["color"],
+    ]
+    _require_headers(records, required, source)
+    usable: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in records:
+        # Only current in-line product is included. This guards against a future
+        # source file mixing MFO rows into the same sheet.
+        if norm(row.get(CENTRIC_HEADERS["range"])) != "IN-LINE":
+            continue
+        item = _centric_record(row, source)
+        ean = norm(item["ean"])
+        if not _valid_ean(ean):
+            counters["centric_invalid_ean"] += 1
+            issues.append({
+                "Severity": "Review", "Type": "Centric row without valid EAN",
+                "EAN": clean(item["ean"]), "Article": item["article"],
+                "Detail": f"{source}: raw Centric material number '{item['raw_material_number']}' has EAN/UPC '{item['ean'] or '(blank)'}'.",
+                "Recommended action": "Do not send this product to customers until Centric supplies a numeric EAN/UPC.",
+            })
+            continue
+        if ean in seen:
+            counters["centric_duplicate_source_ean"] += 1
+            issues.append({
+                "Severity": "Warning", "Type": "Duplicate Centric EAN in source",
+                "EAN": item["ean"], "Article": item["article"],
+                "Detail": f"{source}: EAN appears more than once. The first row is used.",
+                "Recommended action": "Check the Centric master-data export for duplicate UPC/EAN assignments.",
+            })
+            continue
+        seen.add(ean)
+        if not item["country"]:
+            counters["centric_missing_coo"] += 1
+            issues.append({
+                "Severity": "Info", "Type": "Centric COO missing", "EAN": item["ean"], "Article": item["article"],
+                "Detail": f"{source}: Country of Origin for PO is blank; output stays blank rather than borrowing data from UA Material Data.",
+                "Recommended action": "Request a refreshed Centric master-data file if COO is required by the customer.",
+            })
+        usable.append(item)
+    return usable
+
+
 def build_listing(
     oob_bytes: bytes,
     material_bytes: bytes,
     line_list_bytes: bytes,
     changelog_bytes: bytes,
     template_bytes: bytes,
+    centric_underwear_bytes: bytes,
+    centric_outerwear_bytes: bytes,
+    centric_sportswear_bytes: bytes,
     season: str,
 ) -> tuple[list[dict[str, str]], dict[str, Any], list[dict[str, str]], list[dict[str, str]]]:
     """Build the complete active-season customer listing.
@@ -436,11 +618,14 @@ def build_listing(
       1. Current Line List + Licensed List define the active seasonal portfolio.
       2. Change Log applies ADD/DROP corrections where the snapshot and log differ.
       3. Material Data Report expands eligible colorways into individual EAN/size rows.
-      4. OOB does not limit the portfolio. It marks confirmed items and retains an
-         individual EAN when that confirmed EAN is outside the active master scope.
+      4. OOB does not limit the UA portfolio. It marks confirmed items and retains an
+         individual UA EAN when that confirmed EAN is outside the active master scope.
+      5. Centric Brands In-line files are a separate licensed-product stream and
+         are appended directly from their own master data. MFO underwear is excluded.
 
-    The result deliberately excludes products that exist only in Material Data:
-    these are not necessarily available for EMEA FW26 ordering.
+    The result deliberately excludes standard-UA products that exist only in Material Data:
+    these are not necessarily available for EMEA FW26 ordering. Centric In-line products
+    are included without relying on the UA Line List or OOB.
     """
     raw_oob_rows = _read_sheet_from_xlsx(oob_bytes, "Sheet1")
     raw_material_rows = _read_sheet_from_xlsx(material_bytes, "Sheet 1")
@@ -449,6 +634,10 @@ def build_listing(
     changes = _read_sheet_from_xlsx(changelog_bytes, "Adds-Drops")
     date_changes = _read_sheet_from_xlsx(changelog_bytes, "Date Changes")
     template_rows = _read_sheet_from_xlsx(template_bytes, "Sheet1")
+    centric_underwear_in_line = _read_sheet_from_xlsx(centric_underwear_bytes, "In_line Underwear_Undershirts")
+    centric_underwear_boys = _read_sheet_from_xlsx(centric_underwear_bytes, "Boys_Underwear")
+    centric_outerwear = _read_sheet_from_xlsx(centric_outerwear_bytes, "Sheet1")
+    centric_sportswear = _read_sheet_from_xlsx(centric_sportswear_bytes, "Sheet1")
 
     _require_headers(raw_oob_rows, OOB_HEADERS.values(), "OOB")
     _require_headers(raw_material_rows, MATERIAL_HEADERS.values(), "Material Data Report")
@@ -471,7 +660,7 @@ def build_listing(
         row for row in raw_licensed_rows
         if not _is_summary_row(row, [LINE_HEADERS["colorway"]])
     ]
-    _require_headers(line_rows, LINE_HEADERS.values(), "Line List")
+    _require_headers(line_rows, LINE_REQUIRED_HEADERS, "Line List")
     _require_headers(changes, ["Change Date", "Colorway Number", "Record Change"], "Change Log / Adds-Drops")
     _require_headers(
         date_changes,
@@ -482,6 +671,32 @@ def build_listing(
     reference = _reference_indexes(template_rows)
     issues: list[dict[str, str]] = []
     counters = Counter()
+    if LINE_HEADERS["hero_look_name"] not in line_rows[0]:
+        issues.append({
+            "Severity": "Review", "Type": "Line List Hero Look Name column missing", "EAN": "", "Article": "",
+            "Detail": "The EMEA Line List does not contain the Hero Look Name column; all output GHL values default to NE.",
+            "Recommended action": "Confirm whether Hero Look Name was removed or renamed before sending the customer listing.",
+        })
+
+    # Centric data is authoritative for the licensed product stream.  Underwear
+    # deliberately excludes the MFO sheet; outerwear and sportswear use their In-line files.
+    centric_sources = (
+        (centric_underwear_in_line, "Centric Underwear In-line"),
+        (centric_underwear_boys, "Centric Boys Underwear"),
+        (centric_outerwear, "Centric Outerwear In-line"),
+        (centric_sportswear, "Centric Sportswear In-line"),
+    )
+    centric_authoritative_articles = {
+        norm(_centric_article_and_style(row)[0])
+        for records, _ in centric_sources
+        for row in records
+        if norm(row.get(CENTRIC_HEADERS["range"])) == "IN-LINE" and _centric_article_and_style(row)[0]
+    }
+    centric_records = [
+        item
+        for records, source_name in centric_sources
+        for item in _centric_rows(records, source_name, issues, counters)
+    ]
 
     # Index all potential EAN master data. Material Data can contain products that
     # are technically in the season but are not part of the sellable EMEA line.
@@ -564,6 +779,9 @@ def build_listing(
     for material in material_rows:
         article = norm(material.get(MATERIAL_HEADERS["article"]))
         if article not in active_colorways:
+            continue
+        if article in centric_authoritative_articles:
+            counters["generic_ua_rows_replaced_by_centric"] += 1
             continue
         ean = norm(material.get(MATERIAL_HEADERS["ean"]))
         if not ean:
@@ -668,10 +886,30 @@ def build_listing(
         final_eans.add(ean)
         oob_exceptions += 1
 
+    # Add the separate Centric Brands In-line portfolio.  These rows never depend
+    # on OOB, generic UA Material Data or the UA Licensed List.  If an EAN happens
+    # to exist in the generic UA stream, Centric wins for that licensed product.
+    existing_scope_by_ean = {norm(_scope_ean(record)): record for record in scope_records}
+    for centric in centric_records:
+        ean = norm(centric["ean"])
+        old = existing_scope_by_ean.get(ean)
+        if old is not None:
+            old["discard"] = True
+            issues.append({
+                "Severity": "Info", "Type": "Centric data overrides generic UA row",
+                "EAN": centric["ean"], "Article": centric["article"],
+                "Detail": "The same EAN was present in the generic UA stream; Centric master data is authoritative for this licensed product.",
+                "Recommended action": "No action. The final listing uses the Centric row.",
+            })
+        scope_records.append({"centric": centric, "material": None, "oob": None, "source": centric["source"]})
+        existing_scope_by_ean[ean] = scope_records[-1]
+        final_eans.add(ean)
+    scope_records = [record for record in scope_records if not record.get("discard")]
+
     # Build fallback ranges from the whole final scope, not just from OOB sizes.
     style_sizes = _scope_style_sizes(scope_records)
     scope_records.sort(key=lambda record: (
-        clean(record.get("material", {}).get(MATERIAL_HEADERS["style"])) if record.get("material") else _style_from_article(_scope_article(record)),
+        _scope_style(record),
         _scope_article(record),
         _size_order_key(_scope_size(record)),
         _scope_ean(record),
@@ -681,6 +919,7 @@ def build_listing(
     scope_audit_rows: list[dict[str, str]] = []
     for record in scope_records:
         material = record.get("material")
+        centric = record.get("centric")
         oob = record.get("oob")
         source = clean(record.get("source"))
         article = _scope_article(record)
@@ -705,7 +944,7 @@ def build_listing(
                 "Recommended action": "No listing action. Reconcile with UA only where source-data consistency is required.",
             })
 
-        if line is None:
+        if line is None and centric is None:
             if source == "Change Log ADD":
                 counters["add_without_line_row"] += 1
                 issues.append({
@@ -721,11 +960,11 @@ def build_listing(
                     "Recommended action": "Keep it as a confirmed exception; check whether it is a carryover, replacement, or discontinued SKU.",
                 })
 
-        style = clean(material.get(MATERIAL_HEADERS["style"])) if material else _style_from_article(article)
-        division = clean(material.get(MATERIAL_HEADERS["division"])) if material else clean(oob.get(OOB_HEADERS["division"])) if oob else ""
-        gender = clean(material.get(MATERIAL_HEADERS["gender"])) if material else clean(oob.get(OOB_HEADERS["gender"])) if oob else ""
-        size_group = clean(material.get(MATERIAL_HEADERS["size_group"])) if material else ""
-        style_description = clean(material.get(MATERIAL_HEADERS["style_name"])) if material else clean(oob.get(OOB_HEADERS["description"])) if oob else ""
+        style = clean(centric.get("style")) if centric else (clean(material.get(MATERIAL_HEADERS["style"])) if material else _style_from_article(article))
+        division = clean(centric.get("division")) if centric else (clean(material.get(MATERIAL_HEADERS["division"])) if material else clean(oob.get(OOB_HEADERS["division"])) if oob else "")
+        gender = clean(centric.get("gender")) if centric else (clean(material.get(MATERIAL_HEADERS["gender"])) if material else clean(oob.get(OOB_HEADERS["gender"])) if oob else "")
+        size_group = clean(centric.get("size_group")) if centric else (clean(material.get(MATERIAL_HEADERS["size_group"])) if material else "")
+        style_description = clean(centric.get("description")) if centric else (clean(material.get(MATERIAL_HEADERS["style_name"])) if material else clean(oob.get(OOB_HEADERS["description"])) if oob else "")
 
         ref_row = reference["exact"].get((norm(article), norm(size)))
         size_eur = clean(ref_row.get("Size EUR")) if ref_row else ""
@@ -734,6 +973,11 @@ def build_listing(
             if len(candidates) == 1:
                 size_eur = next(iter(candidates))
                 counters["size_eur_reference_fallback"] += 1
+        if not size_eur and centric is not None:
+            # Centric supplies age labels (e.g. 6-7YR), not a separate EU-size
+            # conversion. Preserve the source label rather than inventing 122/128.
+            size_eur = size
+            counters["centric_size_eur_source_label"] += 1
         if not size_eur and norm(division) == "ACCESSORIES":
             size_eur = "UNI" if norm(size) in {"OSFA", "OSFM"} else size
         if not size_eur:
@@ -796,8 +1040,13 @@ def build_listing(
             "Product Division": division,
             "Gender Description": gender,
             "Size Group Description": size_group,
-            "End Use": clean(line.get(LINE_HEADERS["end_use"])) if line else (clean(material.get(MATERIAL_HEADERS["end_use"])) if material else clean(oob.get(OOB_HEADERS["end_use"])) if oob else ""),
+            "End Use": clean(centric.get("end_use")) if centric else (clean(line.get(LINE_HEADERS["end_use"])) if line else (clean(material.get(MATERIAL_HEADERS["end_use"])) if material else clean(oob.get(OOB_HEADERS["end_use"])) if oob else "")),
             "Signature Collections": clean(line.get(LINE_HEADERS["signature"])) if line else "",
+            # GHL is a commercial flag from the EMEA Line List.  Any non-empty
+            # Hero Look Name marks the whole style/colorway as a Global Hero Look.
+            # The current FW26 values are Q3/Q4 labels, but we intentionally use
+            # non-empty as the rule to remain robust if UA changes the naming.
+            "GHL": "ANO" if line and clean(line.get(LINE_HEADERS["hero_look_name"])) else "NE",
             "Story Tier": clean(line.get(LINE_HEADERS["storytier"])) if line else "",
             "Fit Type": clean(line.get(LINE_HEADERS["fit"])) if line else "",
             "Merch Department": clean(material.get(MATERIAL_HEADERS["merch_department"])) if material else "",
@@ -807,8 +1056,8 @@ def build_listing(
             "Shipment Start Date": _date_string(ship_start),
             "Shipment End Date": _date_string(clean(line.get(LINE_HEADERS["ship_end"])) if line else ""),
             "Launch Date": _date_string(launch_date),
-            "Color Group": clean(material.get(MATERIAL_HEADERS["color_group"])) if material else "",
-            "Primary Color": clean(material.get(MATERIAL_HEADERS["primary_color"])) if material else "",
+            "Color Group": clean(centric.get("color")) if centric else (clean(material.get(MATERIAL_HEADERS["color_group"])) if material else ""),
+            "Primary Color": clean(centric.get("color")) if centric else (clean(material.get(MATERIAL_HEADERS["primary_color"])) if material else ""),
             "Secondary Color": clean(material.get(MATERIAL_HEADERS["secondary_color"])) if material else "",
             "Logo Colorway": clean(material.get(MATERIAL_HEADERS["logo_color"])) if material else "",
             "Product Ranking": clean(material.get(MATERIAL_HEADERS["ranking"])) if material else (clean(line.get(LINE_HEADERS["fashion_grade"])) if line else ""),
@@ -819,11 +1068,11 @@ def build_listing(
             "Volume": volume,
             "Dimensions (inch)": dimensions_in,
             "Dimensions (cm)": dimensions_cm,
-            "HTS Code": clean(material.get(MATERIAL_HEADERS["hts"])) if material else "",
-            "COO COUNTRY": clean(material.get(MATERIAL_HEADERS["country"])) if material else "",
-            "FEDAS Code": clean(material.get(MATERIAL_HEADERS["fedas"])) if material else "",
-            "FEDAS Size Range": clean(material.get(MATERIAL_HEADERS["fedas_size"])) if material else "",
-            "Material": clean(material.get(MATERIAL_HEADERS["material"])) if material else "",
+            "HTS Code": clean(centric.get("hts")) if centric else (clean(material.get(MATERIAL_HEADERS["hts"])) if material else ""),
+            "COO COUNTRY": clean(centric.get("country")) if centric else (clean(material.get(MATERIAL_HEADERS["country"])) if material else ""),
+            "FEDAS Code": clean(centric.get("fedas")) if centric else (clean(material.get(MATERIAL_HEADERS["fedas"])) if material else ""),
+            "FEDAS Size Range": clean(centric.get("fedas_size")) if centric else (clean(material.get(MATERIAL_HEADERS["fedas_size"])) if material else ""),
+            "Material": clean(centric.get("material")) if centric else (clean(material.get(MATERIAL_HEADERS["material"])) if material else ""),
             "Tech Platform": clean(line.get(LINE_HEADERS["tech"])) if line else (clean(material.get(MATERIAL_HEADERS["tech"])) if material else ""),
         })
         output_rows.append(row)
@@ -834,8 +1083,11 @@ def build_listing(
             "Listing Scope": source,
             "In OOB": "Yes" if oob is not None else "No",
             "In Current Line List": "Yes" if line is not None else "No",
+            "GHL": row["GHL"],
+            "Hero Look Name": clean(line.get(LINE_HEADERS["hero_look_name"])) if line else "",
             "Latest Change Log": change_status,
             "Latest Change Date": clean(latest_add_drop.get("Change Date")),
+            "Source Material Number": clean(centric.get("raw_material_number")) if centric else "",
         })
 
     summary: dict[str, Any] = {
@@ -847,10 +1099,20 @@ def build_listing(
         "Change Log DROP colorways removed from broad portfolio": len(dropped_from_current_line),
         "Change Log ADD colorways included outside current Line List": len(added_with_material),
         "Change Log ADD colorways without Material Data": len(added_without_material),
-        "Active portfolio EANs from Line List / Master Data": len(scope_records) - oob_exceptions,
+        "Active portfolio EANs from Line List / Master Data": sum(1 for record in scope_records if clean(record.get("source")) in {"Active Line List", "Change Log ADD"}),
         "OOB EANs already present in active portfolio": oob_already_active,
         "OOB confirmed exception EANs retained": oob_exceptions,
         "OOB / Change Log DROP conflict EANs retained": counters["oob_change_log_drop_conflicts"],
+        "Centric Underwear In-line EANs": sum(1 for row in centric_records if row["source"] == "Centric Underwear In-line"),
+        "Centric Boys Underwear EANs": sum(1 for row in centric_records if row["source"] == "Centric Boys Underwear"),
+        "Centric Outerwear In-line EANs": sum(1 for row in centric_records if row["source"] == "Centric Outerwear In-line"),
+        "Centric Sportswear In-line EANs": sum(1 for row in centric_records if row["source"] == "Centric Sportswear In-line"),
+        "Centric MFO EANs included": 0,
+        "Centric invalid / placeholder EAN rows excluded": counters["centric_invalid_ean"],
+        "Centric missing COO rows": counters["centric_missing_coo"],
+        "Generic UA Material Data rows superseded by Centric": counters["generic_ua_rows_replaced_by_centric"],
+        "GHL = ANO rows": sum(1 for row in output_rows if row.get("GHL") == "ANO"),
+        "GHL = NE rows": sum(1 for row in output_rows if row.get("GHL") == "NE"),
         "Final listing rows": len(output_rows),
         "Missing Material Data rows": counters["missing_material"],
         "Missing Line List rows": counters["missing_line"],
@@ -1089,7 +1351,7 @@ def audit_xlsx(
     summary_rows = [["Metric", "Value"]] + [[key, str(value)] for key, value in summary.items()]
     issue_headers = ["Severity", "Type", "EAN", "Article", "Detail", "Recommended action"]
     issue_rows = [issue_headers] + [[issue.get(header, "") for header in issue_headers] for issue in issues]
-    scope_headers = ["EAN", "Article", "Size UA", "Listing Scope", "In OOB", "In Current Line List", "Latest Change Log", "Latest Change Date"]
+    scope_headers = ["EAN", "Article", "Size UA", "Listing Scope", "In OOB", "In Current Line List", "GHL", "Hero Look Name", "Latest Change Log", "Latest Change Date", "Source Material Number"]
     scope_table = [scope_headers] + [[row.get(header, "") for header in scope_headers] for row in scope_rows]
     return _write_minimal_xlsx([("Summary", summary_rows), ("Exceptions", issue_rows), ("Scope", scope_table)])
 
@@ -1100,10 +1362,14 @@ def build_files(
     line_list_bytes: bytes,
     changelog_bytes: bytes,
     template_bytes: bytes,
+    centric_underwear_bytes: bytes,
+    centric_outerwear_bytes: bytes,
+    centric_sportswear_bytes: bytes,
     season: str,
 ) -> tuple[bytes, bytes, dict[str, Any], list[dict[str, str]]]:
     rows, summary, issues, scope_rows = build_listing(
-        oob_bytes, material_bytes, line_list_bytes, changelog_bytes, template_bytes, season
+        oob_bytes, material_bytes, line_list_bytes, changelog_bytes, template_bytes,
+        centric_underwear_bytes, centric_outerwear_bytes, centric_sportswear_bytes, season
     )
     return (
         listing_xlsx_from_template(template_bytes, rows),
@@ -1118,6 +1384,9 @@ def build_from_paths(
     line_list_path: str | Path,
     changelog_path: str | Path,
     template_path: str | Path,
+    centric_underwear_path: str | Path,
+    centric_outerwear_path: str | Path,
+    centric_sportswear_path: str | Path,
     season: str,
 ) -> tuple[bytes, bytes, dict[str, Any], list[dict[str, str]]]:
     return build_files(
@@ -1126,5 +1395,8 @@ def build_from_paths(
         Path(line_list_path).read_bytes(),
         Path(changelog_path).read_bytes(),
         Path(template_path).read_bytes(),
+        Path(centric_underwear_path).read_bytes(),
+        Path(centric_outerwear_path).read_bytes(),
+        Path(centric_sportswear_path).read_bytes(),
         season,
     )
