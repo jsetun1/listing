@@ -1,42 +1,73 @@
 # UA Seasonal Listing Builder
 
-Aplikace vytváří **kompletní zákaznický listing aktivního sezónního sortimentu** — nejen položek, které USDistribution již předobjednal v OOB.
+Aplikace vytváří jeden zákaznický listing kompletního **aktivního sezónního portfolia**. Standardní UA produkty a licencované produkty Centric Brands jsou v ní vědomě rozděleny do dvou datových proudů, protože obecný UA Material Data Report není pro Centric autoritativní.
 
-## Co vstupní soubory znamenají
+## Vstupy
 
-1. **EMEA Line List** + **Licensed List** jsou výchozí seznam produktů, které jsou v dané sezóně aktivní a mohou být objednatelné.
-2. **Change Log** aktualizuje tento rozsah:
-   - `DROP` vyřadí colorway z širokého aktivního portfolia;
-   - `ADD` jej přidá, ale pouze tehdy, pokud jsou v Material Data Reportu dostupné konkrétní EANy a velikosti;
-   - datumové změny přepisují `Shipment Start Date` a `Launch Date`.
-3. **Material Data Report** rozpadá aktivní colorwaye na konkrétní EANy, velikosti a produktová / logistická data.
-4. **OOB** není filtr rozsahu. Označuje již objednané položky a chrání jednotlivé potvrzené EANy, které v aktivní kombinaci Line List + Master Data chybějí.
-5. **Referenční listing / muster** určuje výstupní layout a je referencí pro `Size UA → Size EUR` a chybějící `Size Scale`.
+### Standardní UA portfolio
 
-## Přesná logika rozsahu
+1. **OOB** – pouze potvrzuje objednané standardní UA EANy. Neomezuje šíři sezonního listingu.
+2. **UA Material Data Report** – EANová, produktová a logistická master data standardních UA produktů.
+3. **EMEA Line List** včetně Licensed Listu – určuje, které standardní UA colorwaye jsou v sezoně aktivní.
+4. **EMEA Line List Change Log** – aplikuje ADD/DROP a změny termínů na standardní UA portfolio.
+5. **Referenční listing / muster** – cílové sloupce a formát exportu; reference pro Size EUR a Size Scale.
+
+### Centric Brands – licencované produkty
+
+6. **FW26 Master_Data_Underwear_In Line.xlsx**
+   - používá se `In_line Underwear_Undershirts` a `Boys_Underwear`;
+   - list `MFO_Underwear_Undershirts` se vždy ignoruje.
+7. **FW26 Master_Data_Outerwear_In Line.xlsx** – vše s `Range Segment = IN-LINE`.
+8. **FW26 Master_Data_Sportswear_In Line.xlsx** – vše s `Range Segment = IN-LINE`.
+
+## Pravidla rozsahu
 
 ```text
 Finální listing
-= aktivní Line List + Licensed List
-  − aktuální DROP z Change Logu
-  + aktuální ADD z Change Logu, pokud mají EANy v Masterdatech
-  + jednotlivé OOB EANy mimo tento rozsah (potvrzené výjimky)
+= aktivní standardní UA portfolio z Line Listu + Change Logu
++ OOB potvrzené UA EANové výjimky
++ Centric In-line underwear / boys underwear / kids outerwear / kids sportswear
+− Centric MFO
 ```
 
-Proto:
+Centric produkty nejsou závislé na OOB ani na UA Material Data Reportu. Pokud generic UA Material Data obsahuje stejný Centric article, Centric řádek jej nahradí, i když generic UA report uvádí jiný EAN, COO, FEDAS nebo materiál.
 
-- produkt v **Line Listu**, ale ne v OOB → **je v listingu**, protože jej můžete později doobjednat;
-- produkt pouze v **Masterdatech**, mimo Line List a Change Log ADD → **není v listingu**;
-- EAN v **OOB**, který je ve starším Change Logu `DROP` → **zůstává v listingu**, ale je označen jako konflikt;
-- `ADD` bez EANů v Masterdatech → **nezařadí se**, ale objeví se v auditu.
+## GHL (Global Hero Look)
+
+- Pro standardní UA položky se `GHL` přebírá z pole **Hero Look Name** v EMEA Line Listu.
+- Je-li pro konkrétní colorway `Hero Look Name` neprázdný, výsledná hodnota je `ANO`; je-li prázdný nebo pro položku neexistuje Line List řádek, hodnota je `NE`.
+- FW26 hodnoty Hero Look Name začínají Q3 nebo Q4. Skript však záměrně testuje neprázdnost pole, aby zůstal platný i při případné budoucí změně pojmenování.
+- Audit na listu **Scope** obsahuje výsledný příznak `GHL` i původní `Hero Look Name`.
+
+## Kódy Centric
+
+- Pokud má Centric vyplněný `UA Full Article Code`, použije se tento standardní UA kód, například `6011474-001`.
+- Pokud jej nemá, ale má `UA Style Code` + `UA Colour Code`, vytvoří se standardní UA article, například `1383915-001`.
+- Pokud je v obou polích `N/A`, parser použije Centric kód. Například:
+
+```text
+Raw Material Number: 25UJFJM07F-001-JPC
+Style:               25UJFJM07F
+Article:             25UJFJM07F-001
+SKU / usdis:         25UJFJM07F-001-6-7YR
+```
+
+Přípona jako `-JPC`, `-EPC` nebo `-PC` se do zákaznického Article/SKU nepřepisuje; zůstává v auditu jako **Source Material Number**.
+
+## Důležité kontroly
+
+- Nenumerický nebo chybějící EAN/UPC, například `tbc`, se nezapíše do zákaznického listingu a je v auditu jako `Centric row without valid EAN`.
+- U Centric outerwear a sportswear jsou v aktuálním FW26 souboru prázdné hodnoty `Country of Origin for PO`; výstup je nechá prázdné a audit je označí jako `Centric COO missing`.
+- Centric zdroj nedává oddělené Size EUR pro věkové velikosti, proto se u nich bezpečně zachovává zdrojový label, například `6-7YR`, namísto neověřeného převodu na 122/128.
+- Centric zdroj nedává oficiální Size Scale. Aplikace ji transparentně odvodí z velikostí daného stylu a označí v auditu.
 
 ## Výstupy
 
-- `FW26_active_listing_data.xlsx` — zákaznický listing přesně ve sloupcové struktuře Musteru.
+- `FW26_active_listing_data.xlsx` – zákaznický listing ve struktuře Musteru.
 - `FW26_active_listing_audit.xlsx`
-  - **Summary** — počty a použitá pravidla;
-  - **Exceptions** — konflikty, chybějící data a manuální kontroly;
-  - **Scope** — každý výsledný EAN s informací, zda vznikl z aktivního Line Listu, Change Log ADD, nebo jako potvrzená OOB výjimka.
+  - **Summary** – počty podle zdrojů a použitých pravidel;
+  - **Exceptions** – chybějící EANy, COO, Size EUR, konflikty a další kontroly;
+  - **Scope** – každý výsledný EAN a jeho původ, včetně Centric raw Material Number.
 
 ## Lokální spuštění
 
@@ -45,4 +76,4 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Pro každou sezónu stačí nahrát nových pět exportů. Názvy souborů nejsou v aplikaci natvrdo.
+Pro každou sezónu nahrajete osm aktuálních souborů. Názvy souborů nejsou v aplikaci natvrdo, rozhodující je struktura jednotlivých exportů.
