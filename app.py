@@ -7,7 +7,7 @@ st.set_page_config(page_title="UA Seasonal Listing Builder", layout="wide")
 st.title("UA Seasonal Listing Builder")
 st.caption(
     "Kompletní sezónní listing: aktivní standardní UA portfolio a samostatný licenční "
-    "portfolio stream od Centric Brands. OOB slouží pouze pro UA objednávky a potvrzené výjimky."
+    "portfolio stream od Centric Brands. OOB potvrzuje UA objednávky a je podmínkou pro Change Log ADD položky."
 )
 
 with st.sidebar:
@@ -30,7 +30,7 @@ with right:
     st.info(
         "Muster určuje cílové sloupce a formát. Používá se také jako reference pro "
         "Size UA → Size EUR a Size Scale standardního UA sortimentu. GHL se přebírá "
-        "z neprázdného pole Hero Look Name v Line Listu (ANO / NE)."
+        "z neprázdného pole Hero Look Name v Line Listu (ANO / NE). Sloupec Brand je Under Armour pro standardní UA sortiment a Centric Brand pro licencované Centric produkty. Change Log ADD se zařadí pouze při potvrzení v OOB."
     )
 
 st.subheader("Centric Brands – licencované produkty")
