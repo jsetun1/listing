@@ -28,13 +28,21 @@ OUTPUT_HEADERS = [
     "Style", "Article", "SKU", "usdis", "Style Description", "Size UA",
     "Size US DIST.", "Size EUR", "Size Scale", "Selling Season", "EAN",
     "Product Division", "Gender Description", "Size Group Description", "End Use",
-    "Signature Collections", "DTC exclusive", "GHL", "Story Tier", "Fit Type",
+    "Signature Collections", "Brand", "GHL", "Story Tier", "Fit Type",
     "Merch Department", "Class Description", "Sub Class Description", "Period",
     "Shipment Start Date", "Shipment End Date", "Launch Date", "Color Group",
     "Primary Color", "Secondary Color", "Logo Colorway", "Product Ranking", "C/O",
     "Gross Weight (kg)", "Article Lenght", "Article Width", "Article Height",
     "Volume", "Dimensions (inch)", "Dimensions (cm)", "HTS Code", "COO COUNTRY",
     "FEDAS Code", "FEDAS Size Range", "Material", "Tech Platform", "Product photo",
+]
+
+# Older Muster files use the now retired column label ``DTC exclusive``.
+# It occupies the same physical position as the new customer-facing ``Brand``
+# column, so the builder accepts both templates while always exporting ``Brand``.
+LEGACY_OUTPUT_HEADERS = [
+    "DTC exclusive" if header == "Brand" else header
+    for header in OUTPUT_HEADERS
 ]
 
 # The strings are intentionally kept in one place, because UA occasionally makes
@@ -268,6 +276,40 @@ def _read_matching_sheet_from_xlsx(
     raise ValueError(
         f"{source_name} does not contain a worksheet with the required columns. "
         f"Available sheets: {available}. Expected headers include: {missing}."
+    )
+
+
+def _read_template_listing_from_xlsx(file_bytes: bytes) -> tuple[list[dict[str, str]], str]:
+    """Read the reference listing with support for the retired DTC column name.
+
+    Existing Muster files may still contain ``DTC exclusive``.  The column has
+    the same position and style as the new ``Brand`` field, so records are
+    normalised in memory and the generated customer file always receives the
+    new header.
+    """
+    sheet_names = _sheet_names_from_xlsx(file_bytes)
+    preferred = [name for name in ("Sheet1", "Sheet 1") if name in sheet_names]
+    candidates = preferred + [name for name in sheet_names if name not in preferred]
+    expected_new = set(OUTPUT_HEADERS)
+    expected_legacy = set(LEGACY_OUTPUT_HEADERS)
+    details: list[str] = []
+    for sheet_name in candidates:
+        records = _read_sheet_from_xlsx(file_bytes, sheet_name)
+        headers = set(records[0]) if records else set()
+        if expected_new.issubset(headers):
+            return records, sheet_name
+        if expected_legacy.issubset(headers):
+            normalised: list[dict[str, str]] = []
+            for record in records:
+                updated = dict(record)
+                updated["Brand"] = updated.pop("DTC exclusive", "")
+                normalised.append(updated)
+            return normalised, sheet_name
+        details.append(f"{sheet_name} ({len(headers)} headers)")
+    available = ", ".join(sheet_names) or "none"
+    raise ValueError(
+        "Reference listing / Muster does not contain a worksheet with the expected listing columns. "
+        f"Available sheets: {available}. Expected the current 'Brand' column or legacy 'DTC exclusive'."
     )
 
 
@@ -756,9 +798,7 @@ def build_listing(
     raw_licensed_rows = _read_sheet_from_xlsx(line_list_bytes, "Licensed List")
     changes = _read_sheet_from_xlsx(changelog_bytes, "Adds-Drops")
     date_changes = _read_sheet_from_xlsx(changelog_bytes, "Date Changes")
-    template_rows, _template_sheet_name = _read_matching_sheet_from_xlsx(
-        template_bytes, OUTPUT_HEADERS, "Reference listing / Muster", preferred_sheet_names=("Sheet1", "Sheet 1")
-    )
+    template_rows, _template_sheet_name = _read_template_listing_from_xlsx(template_bytes)
     centric_underwear_in_line = _read_sheet_from_xlsx(centric_underwear_bytes, "In_line Underwear_Undershirts")
     centric_underwear_boys = _read_sheet_from_xlsx(centric_underwear_bytes, "Boys_Underwear")
     centric_outerwear, _centric_outerwear_sheet_name = _read_first_nonempty_sheet_from_xlsx(
@@ -1198,6 +1238,10 @@ def build_listing(
             "Size Group Description": size_group,
             "End Use": clean(centric.get("end_use")) if centric else (clean(line.get(LINE_HEADERS["end_use"])) if line else (clean(material.get(MATERIAL_HEADERS["end_use"])) if material else clean(oob.get(OOB_HEADERS["end_use"])) if oob else "")),
             "Signature Collections": clean(line.get(LINE_HEADERS["signature"])) if line else "",
+            # Brand replaces the former DTC-exclusive flag. Standard UA rows are
+            # labelled Under Armour; all licensed rows sourced from Centric Brands
+            # (underwear, kids outerwear and kids sportswear) are labelled Centric Brand.
+            "Brand": "Centric Brand" if centric else "Under Armour",
             # GHL is a commercial flag from the EMEA Line List.  Any non-empty
             # Hero Look Name marks the whole style/colorway as a Global Hero Look.
             # The current FW26 values are Q3/Q4 labels, but we intentionally use
@@ -1300,9 +1344,7 @@ def _template_sheet_and_styles(template_bytes: bytes) -> tuple[str, dict[str, st
     # Select the Muster sheet by its expected listing headers rather than by a
     # generic label such as Sheet1. This makes the builder tolerant of harmless
     # worksheet renames (e.g. Sheet2 in an updated export).
-    _, template_sheet_name = _read_matching_sheet_from_xlsx(
-        template_bytes, OUTPUT_HEADERS, "Reference listing / Muster", preferred_sheet_names=("Sheet1", "Sheet 1")
-    )
+    _, template_sheet_name = _read_template_listing_from_xlsx(template_bytes)
     with zipfile.ZipFile(BytesIO(template_bytes)) as zf:
         paths = _sheet_paths(zf)
         root = ET.fromstring(zf.read(paths[template_sheet_name]))
