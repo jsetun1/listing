@@ -297,28 +297,108 @@ def _style_from_article(article: str) -> str:
     return clean(article).split("-")[0]
 
 
-def _extract_volume_and_dimensions(catalog_copy: str) -> tuple[str, str, str]:
-    """Best-effort extraction from Line List copy for bags and accessories."""
+def _format_dimension_cm(value: float) -> str:
+    """Format a centimetre value consistently for customer-facing output."""
+    return f"{value:.1f}".replace(".", ",")
+
+
+def _format_dimension_in(value: float) -> str:
+    """Avoid trailing .0 while retaining half-inch / decimal source values."""
+    rounded = round(value, 2)
+    return str(int(rounded)) if rounded.is_integer() else f"{rounded:g}"
+
+
+def _material_dimensions(material: dict[str, str] | None) -> tuple[str, str, str]:
+    """Return Article Length / Width / Height exactly as supplied by UA Material Data."""
+    if material is None:
+        return "", "", ""
+    return (
+        clean(material.get(MATERIAL_HEADERS["length"])),
+        clean(material.get(MATERIAL_HEADERS["width"])),
+        clean(material.get(MATERIAL_HEADERS["height"])),
+    )
+
+
+def _dimensions_cm_string(length: str, width: str, height: str) -> str:
+    """Create the listing dimensions in the same L × W × H order as the three Article columns."""
+    values = [clean(length), clean(width), clean(height)]
+    if not any(values):
+        return ""
+    return " x ".join(f"{value} cm" if value else "" for value in values).strip(" x")
+
+
+def _parse_lwh_dimensions(dimensions_in: str) -> dict[str, float]:
+    """Parse labelled inch dimensions, regardless of the source order.
+
+    Line List copy often writes bags as H × L × W (for example 18"H x 14"L x 2"W),
+    while the listing uses Article Length, Article Width, Article Height.  Labels
+    are therefore used rather than positional order.
+    """
+    values: dict[str, float] = {}
+    for value, label in re.findall(
+        r"(\d+(?:[.,]\d+)?)\s*(?:\"|IN(?:CH(?:ES)?)?)?\s*([LWH])\b",
+        clean(dimensions_in),
+        flags=re.IGNORECASE,
+    ):
+        try:
+            values[label.upper()] = float(value.replace(",", "."))
+        except ValueError:
+            continue
+    return values
+
+
+def _extract_volume_and_dimensions(catalog_copy: str) -> tuple[str, str, str, tuple[str, str, str] | None]:
+    """Extract a clean litre volume and L × W × H dimensions from Line List copy.
+
+    The output intentionally discards surrounding catalogue-copy text such as
+    material composition and Imported.  When labelled L/W/H inch dimensions are
+    present, all related listing fields are standardised from the same source so
+    the three Article dimension columns and Dimensions (cm) cannot contradict one
+    another.
+    """
     copy = clean(catalog_copy)
     if not copy:
-        return "", "", ""
-    volume_match = re.search(r"\bVolume:\s*([^\n]+)", copy, flags=re.IGNORECASE)
-    dimension_match = re.search(r"\bDimensions(?:\s+When\s+Full)?:\s*([^\n]+)", copy, flags=re.IGNORECASE)
-    volume = clean(volume_match.group(1)) if volume_match else ""
-    if "/" in volume:
-        volume = clean(volume.rsplit("/", 1)[-1])
-    dimensions_in = clean(dimension_match.group(1)) if dimension_match else ""
-    dimensions_cm = ""
-    if dimensions_in:
-        # Converts familiar values such as 18"H x 14"L x 2"W. We do not infer
-        # values from non-standard descriptions, which is safer than producing
-        # plausible but incorrect dimensions.
-        figures = re.findall(r"(\d+(?:\.\d+)?)\s*\"", dimensions_in)
-        if len(figures) >= 3:
-            dimensions_cm = " x ".join(
-                f"{float(number) * 2.54:.1f} cm".replace(".", ",") for number in figures[:3]
-            )
-    return volume, dimensions_in, dimensions_cm
+        return "", "", "", None
+
+    volume = ""
+    volume_matches = re.findall(
+        r"(?<![A-Z0-9])(\d+(?:[.,]\d+)?)\s*(?:L|LIT(?:ER|RE)?S?)\b",
+        copy,
+        flags=re.IGNORECASE,
+    )
+    if volume_matches:
+        raw = volume_matches[-1].replace(",", ".")
+        try:
+            numeric = float(raw)
+            volume = f"{int(numeric) if numeric.is_integer() else f'{numeric:g}'} L"
+        except ValueError:
+            volume = ""
+
+    dimension_match = re.search(
+        r"\bDimensions(?:\s+When\s+Full)?:\s*(.*?)(?=\s+\bVolume\s*:|\n|$)",
+        copy,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    raw_dimensions = clean(dimension_match.group(1)) if dimension_match else ""
+    lwh_in = _parse_lwh_dimensions(raw_dimensions)
+    if not {"L", "W", "H"}.issubset(lwh_in):
+        return volume, raw_dimensions, "", None
+
+    length_cm = lwh_in["L"] * 2.54
+    width_cm = lwh_in["W"] * 2.54
+    height_cm = lwh_in["H"] * 2.54
+    article_dimensions = (
+        _format_dimension_cm(length_cm),
+        _format_dimension_cm(width_cm),
+        _format_dimension_cm(height_cm),
+    )
+    dimensions_in = " x ".join([
+        f"{_format_dimension_in(lwh_in['L'])}\"L",
+        f"{_format_dimension_in(lwh_in['W'])}\"W",
+        f"{_format_dimension_in(lwh_in['H'])}\"H",
+    ])
+    dimensions_cm = _dimensions_cm_string(*article_dimensions)
+    return volume, dimensions_in, dimensions_cm, article_dimensions
 
 
 def _reference_indexes(template_records: list[dict[str, str]]) -> dict[str, Any]:
@@ -392,18 +472,6 @@ def _style_sizes(oob_rows: list[dict[str, str]]) -> dict[str, list[str]]:
     return grouped
 
 
-def _material_dimension_string(material: dict[str, str] | None) -> str:
-    if material is None:
-        return ""
-    values = [
-        clean(material.get(MATERIAL_HEADERS["length"])),
-        clean(material.get(MATERIAL_HEADERS["width"])),
-        clean(material.get(MATERIAL_HEADERS["height"])),
-    ]
-    if not any(values):
-        return ""
-    unit = "cm"
-    return " x ".join(f"{value} {unit}" if value else "" for value in values).strip(" x")
 
 
 def _size_order_key(value: str) -> tuple[int, float, str]:
@@ -1020,9 +1088,17 @@ def build_listing(
                 counters["date_changes_applied"] += 1
 
         line_copy = clean(line.get(LINE_HEADERS["catalog_copy"])) if line else ""
-        volume, dimensions_in, dimensions_cm = _extract_volume_and_dimensions(line_copy)
+        volume, dimensions_in, dimensions_cm, line_dimensions = _extract_volume_and_dimensions(line_copy)
+        # UA Material Data and Line List can represent different physical states:
+        # packed/article dimensions versus "Dimensions When Full".  For customer
+        # output, a parseable Line List L/W/H statement wins and is copied into all
+        # four centimetre fields.  Otherwise the Material Data L/W/H fields are used
+        # unchanged and Dimensions (cm) is generated from those exact values.
+        article_length, article_width, article_height = _material_dimensions(material)
+        if line_dimensions is not None:
+            article_length, article_width, article_height = line_dimensions
         if not dimensions_cm:
-            dimensions_cm = _material_dimension_string(material)
+            dimensions_cm = _dimensions_cm_string(article_length, article_width, article_height)
 
         row = {header: "" for header in OUTPUT_HEADERS}
         row.update({
@@ -1062,9 +1138,9 @@ def build_listing(
             "Logo Colorway": clean(material.get(MATERIAL_HEADERS["logo_color"])) if material else "",
             "Product Ranking": clean(material.get(MATERIAL_HEADERS["ranking"])) if material else (clean(line.get(LINE_HEADERS["fashion_grade"])) if line else ""),
             "Gross Weight (kg)": clean(material.get(MATERIAL_HEADERS["weight"])) if material else "",
-            "Article Lenght": clean(material.get(MATERIAL_HEADERS["length"])) if material else "",
-            "Article Width": clean(material.get(MATERIAL_HEADERS["width"])) if material else "",
-            "Article Height": clean(material.get(MATERIAL_HEADERS["height"])) if material else "",
+            "Article Lenght": article_length,
+            "Article Width": article_width,
+            "Article Height": article_height,
             "Volume": volume,
             "Dimensions (inch)": dimensions_in,
             "Dimensions (cm)": dimensions_cm,
@@ -1114,6 +1190,11 @@ def build_listing(
         "GHL = ANO rows": sum(1 for row in output_rows if row.get("GHL") == "ANO"),
         "GHL = NE rows": sum(1 for row in output_rows if row.get("GHL") == "NE"),
         "Final listing rows": len(output_rows),
+        "Clean litre volume rows": sum(1 for row in output_rows if row.get("Volume")),
+        "Dimensions standardised from Line List L/W/H": sum(
+            1 for row in output_rows
+            if row.get("Dimensions (inch)") and row.get("Dimensions (cm)")
+        ),
         "Missing Material Data rows": counters["missing_material"],
         "Missing Line List rows": counters["missing_line"],
         "Change Log ADD rows missing Line List attributes": counters["add_without_line_row"],
