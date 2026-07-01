@@ -77,3 +77,10 @@ streamlit run app.py
 ```
 
 Pro každou sezónu nahrajete osm aktuálních souborů. Názvy souborů nejsou v aplikaci natvrdo, rozhodující je struktura jednotlivých exportů.
+
+## Rozměry a objem
+
+- `Article Lenght`, `Article Width`, `Article Height` jsou vždy v centimetrech a `Dimensions (cm)` je z nich vždy sestaven ve stejném pořadí **L × W × H**. Zákazník tak nikdy nedostane dva rozporné centimetrové údaje.
+- Pokud Line List obsahuje u produktu text `Dimensions When Full` s označenými palci (`L`, `W`, `H`), tento údaj je pro zákaznický listing prioritní. Aplikace jej přepíše do všech tří centimetrových sloupců, převede do cm a sjednotí i `Dimensions (inch)` do pořadí **L × W × H**.
+- Pokud takový údaj v Line Listu není, ponechají se centimetry z UA Material Data a `Dimensions (cm)` se vytvoří přímo z nich.
+- `Volume` obsahuje pouze hodnotu v litrech, například `12 L` nebo `23 L`; z katalogového textu se odstraňuje objem v cubic inches, materiálové složení i `Imported`.
