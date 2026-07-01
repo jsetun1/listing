@@ -1207,14 +1207,39 @@ def build_listing(
     }
     return output_rows, summary, issues, scope_audit_rows
 
-def _template_sheet_and_styles(template_bytes: bytes) -> tuple[str, dict[str, str], dict[str, str], str]:
+def _template_sheet_and_styles(template_bytes: bytes) -> tuple[str, dict[str, str], dict[str, str], dict[str, str], str]:
+    """Read the template's header, highlighted group-start and plain-row styles.
+
+    The Muster uses a grey fill for the first size of each Article (style + colour)
+    and no fill for the remaining sizes.  The original exporter copied the first
+    data row to every result row, which made the whole listing grey.  Here we
+    keep the exact template styles but also derive each grey style's no-fill twin.
+    """
     with zipfile.ZipFile(BytesIO(template_bytes)) as zf:
         paths = _sheet_paths(zf)
         if "Sheet1" not in paths:
             raise ValueError("Reference listing must contain a sheet called Sheet1.")
         root = ET.fromstring(zf.read(paths["Sheet1"]))
+        styles_root = ET.fromstring(zf.read("xl/styles.xml"))
+
+    def xf_signature_without_fill(xf: ET.Element) -> tuple[tuple[tuple[str, str], ...], tuple[bytes, ...]]:
+        attrs = tuple(sorted(
+            (key, value) for key, value in xf.attrib.items()
+            if key not in {"fillId", "applyFill"}
+        ))
+        children = tuple(ET.tostring(child, encoding="utf-8") for child in list(xf))
+        return attrs, children
+
+    no_fill_style_by_signature: dict[tuple[tuple[tuple[str, str], ...], tuple[bytes, ...]], str] = {}
+    cell_xfs = styles_root.find("m:cellXfs", NS)
+    if cell_xfs is not None:
+        for index, xf in enumerate(cell_xfs):
+            if xf.attrib.get("fillId", "0") == "0":
+                no_fill_style_by_signature.setdefault(xf_signature_without_fill(xf), str(index))
+
     header_styles: dict[str, str] = {}
-    body_styles: dict[str, str] = {}
+    highlighted_body_styles: dict[str, str] = {}
+    plain_body_styles: dict[str, str] = {}
     header_row_attrs = ""
     header_row = root.find(".//m:sheetData/m:row[@r='1']", NS)
     if header_row is not None:
@@ -1227,14 +1252,27 @@ def _template_sheet_and_styles(template_bytes: bytes) -> tuple[str, dict[str, st
             col = "".join(char for char in ref if char.isalpha())
             if col:
                 header_styles[col] = cell.attrib.get("s", "0")
+
     first_data_row = root.find(".//m:sheetData/m:row[@r='2']", NS)
     if first_data_row is not None:
         for cell in first_data_row.findall("m:c", NS):
             ref = cell.attrib.get("r", "")
             col = "".join(char for char in ref if char.isalpha())
-            if col:
-                body_styles[col] = cell.attrib.get("s", "0")
-    return paths["Sheet1"], header_styles, body_styles, header_row_attrs
+            if not col:
+                continue
+            highlighted = cell.attrib.get("s", "0")
+            highlighted_body_styles[col] = highlighted
+            plain = highlighted
+            try:
+                if cell_xfs is not None:
+                    plain = no_fill_style_by_signature.get(
+                        xf_signature_without_fill(cell_xfs[int(highlighted)]),
+                        highlighted,
+                    )
+            except (ValueError, IndexError):
+                pass
+            plain_body_styles[col] = plain
+    return paths["Sheet1"], header_styles, highlighted_body_styles, plain_body_styles, header_row_attrs
 
 
 def _shared_strings_xml(strings: list[str], total_count: int) -> bytes:
@@ -1274,14 +1312,15 @@ def _listing_sheet_xml(
     rows: list[dict[str, str]],
     value_index: dict[str, int],
     header_styles: dict[str, str],
-    body_styles: dict[str, str],
+    highlighted_body_styles: dict[str, str],
+    plain_body_styles: dict[str, str],
     header_row_attrs: str,
 ) -> str:
     final_row = len(rows) + 1
     last_col = excel_col(len(headers))
     cells: list[str] = []
 
-    def write_row(row_number: int, values: list[str]) -> None:
+    def write_row(row_number: int, values: list[str], row_styles: dict[str, str] | None = None) -> None:
         extra_attrs = f" {header_row_attrs}" if row_number == 1 and header_row_attrs else ""
         parts = [f'<row r="{row_number}"{extra_attrs}>']
         for index, value in enumerate(values, start=1):
@@ -1289,14 +1328,25 @@ def _listing_sheet_xml(
             if not text:
                 continue
             column = excel_col(index)
-            style = (header_styles if row_number == 1 else body_styles).get(column, "0")
+            style_source = header_styles if row_number == 1 else (row_styles or plain_body_styles)
+            style = style_source.get(column, "0")
             parts.append(f'<c r="{column}{row_number}" s="{style}" t="s"><v>{value_index[text]}</v></c>')
         parts.append("</row>")
         cells.append("".join(parts))
 
     write_row(1, headers)
+    previous_article = None
     for row_number, row in enumerate(rows, start=2):
-        write_row(row_number, [row.get(header, "") for header in headers])
+        article = clean(row.get("Article", ""))
+        # The listing is sorted by Style / Article / size.  Use the grey Muster
+        # style only for the first size of each unique Article (style + colour).
+        is_first_size_of_article = article != previous_article
+        write_row(
+            row_number,
+            [row.get(header, "") for header in headers],
+            highlighted_body_styles if is_first_size_of_article else plain_body_styles,
+        )
+        previous_article = article
     sheet_data = "<sheetData>" + "".join(cells) + "</sheetData>"
 
     return sheet_data, f"A1:{last_col}{final_row}"
@@ -1304,9 +1354,17 @@ def _listing_sheet_xml(
 
 def listing_xlsx_from_template(template_bytes: bytes, rows: list[dict[str, str]]) -> bytes:
     """Create listing XLSX, preserving the source listing's sheet formatting."""
-    sheet_path, header_styles, body_styles, header_row_attrs = _template_sheet_and_styles(template_bytes)
+    sheet_path, header_styles, highlighted_body_styles, plain_body_styles, header_row_attrs = _template_sheet_and_styles(template_bytes)
     value_index, strings, total = _table_to_shared_strings(OUTPUT_HEADERS, rows)
-    new_sheet_data, final_range = _listing_sheet_xml(OUTPUT_HEADERS, rows, value_index, header_styles, body_styles, header_row_attrs)
+    new_sheet_data, final_range = _listing_sheet_xml(
+        OUTPUT_HEADERS,
+        rows,
+        value_index,
+        header_styles,
+        highlighted_body_styles,
+        plain_body_styles,
+        header_row_attrs,
+    )
 
     source = BytesIO(template_bytes)
     target = BytesIO()
