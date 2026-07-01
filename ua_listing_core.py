@@ -734,7 +734,8 @@ def build_listing(
 
     Scope hierarchy:
       1. Current Line List + Licensed List define the active seasonal portfolio.
-      2. Change Log applies ADD/DROP corrections where the snapshot and log differ.
+      2. Change Log applies DROP corrections; a latest-status ADD is included only
+         if the same style/colorway is confirmed in OOB.
       3. Material Data Report expands eligible colorways into individual EAN/size rows.
       4. OOB does not limit the UA portfolio. It marks confirmed items and retains an
          individual UA EAN when that confirmed EAN is outside the active master scope.
@@ -873,23 +874,42 @@ def build_listing(
     # A newer Change Log can correct a Line List snapshot. A DROP does not delete
     # an OOB-confirmed EAN; it only removes the colorway from the broad active
     # portfolio. The confirmed EAN itself is added back below as an OOB exception.
+    #
+    # ADD is intentionally treated more conservatively. In practice, newly added
+    # colorways may appear in the Change Log before their Material Data is complete
+    # (for example without an HTS code). Therefore a latest-status ADD belongs in
+    # the customer listing only when the same style/colorway is already confirmed
+    # in OOB. This rule applies whether the ADD is absent from or already visible in
+    # the current Line List snapshot.
     dropped_from_current_line = line_colorways & drop_colorways
-    active_colorways = line_colorways - dropped_from_current_line
+    add_colorways_without_oob = add_colorways - oob_colorways
+    add_colorways_confirmed_in_oob = add_colorways & oob_colorways
+    add_in_current_line_excluded = line_colorways & add_colorways_without_oob
 
-    # A post-snapshot ADD can be included only if Material Data has actual EAN/size
-    # records. No Material Data means there is nothing a customer could list yet.
-    added_outside_current_line = add_colorways - line_colorways
+    active_colorways = line_colorways - dropped_from_current_line
+    active_colorways.difference_update(add_colorways_without_oob)
+
+    # A post-snapshot ADD can be included only when it is confirmed in OOB and
+    # Material Data contains actual EAN/size records. No Material Data means there
+    # is nothing a customer could list yet.
+    added_outside_current_line = add_colorways_confirmed_in_oob - line_colorways
     added_with_material = {
         colorway for colorway in added_outside_current_line
         if material_by_colorway.get(colorway)
     }
     active_colorways.update(added_with_material)
     added_without_material = added_outside_current_line - added_with_material
+    for colorway in sorted(add_colorways_without_oob):
+        issues.append({
+            "Severity": "Info", "Type": "Change Log ADD excluded (not in OOB)", "EAN": "", "Article": colorway,
+            "Detail": "Latest Change Log status is ADD, but this style/colorway is not present in OOB. It is excluded from the customer listing, including when it appears in the current Line List.",
+            "Recommended action": "Include it after the style/colorway appears in an OOB or another confirmed distributor-order source.",
+        })
     for colorway in sorted(added_without_material):
         issues.append({
             "Severity": "Info", "Type": "Change Log ADD without Material Data", "EAN": "", "Article": colorway,
-            "Detail": "Latest Change Log status is ADD, but the current Material Data Report contains no EAN/size rows for this colorway.",
-            "Recommended action": "Do not list it yet. Include it automatically once the Material Data Report contains its EANs.",
+            "Detail": "Latest Change Log status is ADD and is confirmed in OOB, but the current Material Data Report contains no EAN/size rows for this colorway.",
+            "Recommended action": "Keep the confirmed OOB EAN only if it can be matched; otherwise request refreshed Material Data before listing additional sizes.",
         })
 
     for colorway in sorted(dropped_from_current_line):
@@ -1233,8 +1253,10 @@ def build_listing(
         "OOB summary rows ignored": len(raw_oob_rows) - len(oob_rows),
         "Current Line List colorways (incl. Licensed)": len(line_colorways),
         "Change Log DROP colorways removed from broad portfolio": len(dropped_from_current_line),
-        "Change Log ADD colorways included outside current Line List": len(added_with_material),
-        "Change Log ADD colorways without Material Data": len(added_without_material),
+        "Change Log ADD colorways included outside current Line List (OOB confirmed)": len(added_with_material),
+        "Change Log ADD colorways excluded because not present in OOB": len(add_colorways_without_oob),
+        "Change Log ADD colorways excluded from current Line List because not present in OOB": len(add_in_current_line_excluded),
+        "Change Log ADD colorways without Material Data (OOB confirmed)": len(added_without_material),
         "Active portfolio EANs from Line List / Master Data": sum(1 for record in scope_records if clean(record.get("source")) in {"Active Line List", "Change Log ADD"}),
         "OOB EANs already present in active portfolio": oob_already_active,
         "OOB confirmed exception EANs retained": oob_exceptions,
