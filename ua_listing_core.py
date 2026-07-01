@@ -232,6 +232,56 @@ def _read_sheet_from_xlsx(file_bytes: bytes, sheet_name: str) -> list[dict[str, 
     return records
 
 
+def _sheet_names_from_xlsx(file_bytes: bytes) -> list[str]:
+    """Return worksheets in workbook order."""
+    with zipfile.ZipFile(BytesIO(file_bytes)) as zf:
+        return list(_sheet_paths(zf))
+
+
+def _read_matching_sheet_from_xlsx(
+    file_bytes: bytes,
+    required_headers: Iterable[str],
+    source_name: str,
+    preferred_sheet_names: Iterable[str] = (),
+) -> tuple[list[dict[str, str]], str]:
+    """Read the worksheet that actually contains the expected source columns.
+
+    UA exports are not consistent about generic worksheet labels: a later OOB
+    export may be called ``Sheet2`` rather than ``Sheet1``. We therefore select
+    by header structure first, while retaining the expected worksheet name as a
+    preference when it exists. This keeps named sources such as Line List stable
+    and makes generic one-sheet source workbooks resilient to harmless renames.
+    """
+    sheet_names = _sheet_names_from_xlsx(file_bytes)
+    preferred = [name for name in preferred_sheet_names if name in sheet_names]
+    candidates = preferred + [name for name in sheet_names if name not in preferred]
+    expected = set(required_headers)
+    details: list[str] = []
+    for sheet_name in candidates:
+        records = _read_sheet_from_xlsx(file_bytes, sheet_name)
+        headers = set(records[0]) if records else set()
+        if expected.issubset(headers):
+            return records, sheet_name
+        details.append(f"{sheet_name} ({len(headers)} headers)")
+    available = ", ".join(sheet_names) or "none"
+    missing = ", ".join(required_headers)
+    raise ValueError(
+        f"{source_name} does not contain a worksheet with the required columns. "
+        f"Available sheets: {available}. Expected headers include: {missing}."
+    )
+
+
+def _read_first_nonempty_sheet_from_xlsx(file_bytes: bytes, source_name: str) -> tuple[list[dict[str, str]], str]:
+    """Read the first non-empty worksheet for simple one-table source exports."""
+    sheet_names = _sheet_names_from_xlsx(file_bytes)
+    for sheet_name in sheet_names:
+        records = _read_sheet_from_xlsx(file_bytes, sheet_name)
+        if records and records[0]:
+            return records, sheet_name
+    available = ", ".join(sheet_names) or "none"
+    raise ValueError(f"{source_name} is empty. Available sheets: {available}.")
+
+
 def _require_headers(records: list[dict[str, str]], required: Iterable[str], source_name: str) -> None:
     if not records:
         raise ValueError(f"{source_name} is empty.")
@@ -695,17 +745,27 @@ def build_listing(
     these are not necessarily available for EMEA FW26 ordering. Centric In-line products
     are included without relying on the UA Line List or OOB.
     """
-    raw_oob_rows = _read_sheet_from_xlsx(oob_bytes, "Sheet1")
-    raw_material_rows = _read_sheet_from_xlsx(material_bytes, "Sheet 1")
+    raw_oob_rows, _oob_sheet_name = _read_matching_sheet_from_xlsx(
+        oob_bytes, OOB_HEADERS.values(), "OOB", preferred_sheet_names=("Sheet1", "Sheet 1")
+    )
+    raw_material_rows, _material_sheet_name = _read_matching_sheet_from_xlsx(
+        material_bytes, MATERIAL_HEADERS.values(), "Material Data Report", preferred_sheet_names=("Sheet 1", "Sheet1")
+    )
     raw_line_rows = _read_sheet_from_xlsx(line_list_bytes, "Line List")
     raw_licensed_rows = _read_sheet_from_xlsx(line_list_bytes, "Licensed List")
     changes = _read_sheet_from_xlsx(changelog_bytes, "Adds-Drops")
     date_changes = _read_sheet_from_xlsx(changelog_bytes, "Date Changes")
-    template_rows = _read_sheet_from_xlsx(template_bytes, "Sheet1")
+    template_rows, _template_sheet_name = _read_matching_sheet_from_xlsx(
+        template_bytes, OUTPUT_HEADERS, "Reference listing / Muster", preferred_sheet_names=("Sheet1", "Sheet 1")
+    )
     centric_underwear_in_line = _read_sheet_from_xlsx(centric_underwear_bytes, "In_line Underwear_Undershirts")
     centric_underwear_boys = _read_sheet_from_xlsx(centric_underwear_bytes, "Boys_Underwear")
-    centric_outerwear = _read_sheet_from_xlsx(centric_outerwear_bytes, "Sheet1")
-    centric_sportswear = _read_sheet_from_xlsx(centric_sportswear_bytes, "Sheet1")
+    centric_outerwear, _centric_outerwear_sheet_name = _read_first_nonempty_sheet_from_xlsx(
+        centric_outerwear_bytes, "Centric Kids Outerwear – In Line"
+    )
+    centric_sportswear, _centric_sportswear_sheet_name = _read_first_nonempty_sheet_from_xlsx(
+        centric_sportswear_bytes, "Centric Kids Sportswear – In Line"
+    )
 
     _require_headers(raw_oob_rows, OOB_HEADERS.values(), "OOB")
     _require_headers(raw_material_rows, MATERIAL_HEADERS.values(), "Material Data Report")
@@ -1215,11 +1275,15 @@ def _template_sheet_and_styles(template_bytes: bytes) -> tuple[str, dict[str, st
     data row to every result row, which made the whole listing grey.  Here we
     keep the exact template styles but also derive each grey style's no-fill twin.
     """
+    # Select the Muster sheet by its expected listing headers rather than by a
+    # generic label such as Sheet1. This makes the builder tolerant of harmless
+    # worksheet renames (e.g. Sheet2 in an updated export).
+    _, template_sheet_name = _read_matching_sheet_from_xlsx(
+        template_bytes, OUTPUT_HEADERS, "Reference listing / Muster", preferred_sheet_names=("Sheet1", "Sheet 1")
+    )
     with zipfile.ZipFile(BytesIO(template_bytes)) as zf:
         paths = _sheet_paths(zf)
-        if "Sheet1" not in paths:
-            raise ValueError("Reference listing must contain a sheet called Sheet1.")
-        root = ET.fromstring(zf.read(paths["Sheet1"]))
+        root = ET.fromstring(zf.read(paths[template_sheet_name]))
         styles_root = ET.fromstring(zf.read("xl/styles.xml"))
 
     def xf_signature_without_fill(xf: ET.Element) -> tuple[tuple[tuple[str, str], ...], tuple[bytes, ...]]:
@@ -1272,7 +1336,7 @@ def _template_sheet_and_styles(template_bytes: bytes) -> tuple[str, dict[str, st
             except (ValueError, IndexError):
                 pass
             plain_body_styles[col] = plain
-    return paths["Sheet1"], header_styles, highlighted_body_styles, plain_body_styles, header_row_attrs
+    return paths[template_sheet_name], header_styles, highlighted_body_styles, plain_body_styles, header_row_attrs
 
 
 def _shared_strings_xml(strings: list[str], total_count: int) -> bytes:
