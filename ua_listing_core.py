@@ -681,6 +681,12 @@ def _centric_ean(row: dict[str, str]) -> str:
     return _centric_value(row, CENTRIC_HEADERS["ean"])
 
 
+def _centric_product_division(value: str) -> str:
+    """Normalize Centric's KHQ branded division to the customer-facing Apparel."""
+    division = clean(value)
+    return "Apparel" if "KHQ BRANDED" in norm(division) else division
+
+
 def _valid_ean(value: str) -> bool:
     text = clean(value).replace(" ", "")
     return text.isdigit() and 8 <= len(text) <= 14
@@ -696,7 +702,7 @@ def _centric_record(row: dict[str, str], source: str) -> dict[str, str]:
         "source": source,
         "raw_material_number": _centric_value(row, CENTRIC_HEADERS["material_number"]),
         "description": _centric_value(row, CENTRIC_HEADERS["description"]),
-        "division": _centric_value(row, CENTRIC_HEADERS["division"]),
+        "division": _centric_product_division(_centric_value(row, CENTRIC_HEADERS["division"])),
         "gender": _centric_value(row, CENTRIC_HEADERS["gender"]),
         "size_group": _centric_value(row, CENTRIC_HEADERS["age_group"]),
         "end_use": _centric_value(row, CENTRIC_HEADERS["category"]),
@@ -775,7 +781,9 @@ def build_listing(
     """Build the complete active-season customer listing.
 
     Scope hierarchy:
-      1. Current Line List + Licensed List define the active seasonal portfolio.
+      1. Current standard-UA Line List defines the active standard-UA seasonal portfolio.
+         Licensed products are intentionally excluded from this source and are
+         supplied only by the dedicated Centric Brands master-data files.
       2. Change Log applies DROP corrections; a latest-status ADD is included only
          if the same style/colorway is confirmed in OOB.
       3. Material Data Report expands eligible colorways into individual EAN/size rows.
@@ -795,7 +803,6 @@ def build_listing(
         material_bytes, MATERIAL_HEADERS.values(), "Material Data Report", preferred_sheet_names=("Sheet 1", "Sheet1")
     )
     raw_line_rows = _read_sheet_from_xlsx(line_list_bytes, "Line List")
-    raw_licensed_rows = _read_sheet_from_xlsx(line_list_bytes, "Licensed List")
     changes = _read_sheet_from_xlsx(changelog_bytes, "Adds-Drops")
     date_changes = _read_sheet_from_xlsx(changelog_bytes, "Date Changes")
     template_rows, _template_sheet_name = _read_template_listing_from_xlsx(template_bytes)
@@ -825,10 +832,9 @@ def build_listing(
         row for row in raw_line_rows
         if not _is_summary_row(row, [LINE_HEADERS["colorway"]])
     ]
-    licensed_rows = [
-        row for row in raw_licensed_rows
-        if not _is_summary_row(row, [LINE_HEADERS["colorway"]])
-    ]
+    # Licensed List is intentionally not read. Licensed portfolio data is sourced
+    # exclusively from Centric Brands master-data files, which supersede UA's
+    # generic licensed-product records.
     _require_headers(line_rows, LINE_REQUIRED_HEADERS, "Line List")
     _require_headers(changes, ["Change Date", "Colorway Number", "Record Change"], "Change Log / Adds-Drops")
     _require_headers(
@@ -879,23 +885,23 @@ def build_listing(
         if article:
             material_by_colorway[article].append(row)
 
-    # Current Line List is the base net assortment. Licensed List is equally valid
-    # for licensed products (underwear, bottles, etc.).
+    # The standard-UA Line List is the sole UA assortment source. Licensed items
+    # are deliberately omitted here: their authoritative data is read directly
+    # from Centric Brands masters below.
     line_by_colorway: dict[str, dict[str, str]] = {}
-    for source_name, records in (("Line List", line_rows), ("Licensed List", licensed_rows)):
-        for row in records:
-            colorway = norm(row.get(LINE_HEADERS["colorway"]))
-            if not colorway:
-                continue
-            if colorway in line_by_colorway:
-                counters["duplicate_line_colorways"] += 1
-                issues.append({
-                    "Severity": "Warning", "Type": "Duplicate Line List Colorway", "EAN": "", "Article": colorway,
-                    "Detail": f"The colorway occurs more than once across Line List / Licensed List; the first row is used.",
-                    "Recommended action": "Check whether the Line List export contains duplicate commercial records.",
-                })
-                continue
-            line_by_colorway[colorway] = row
+    for row in line_rows:
+        colorway = norm(row.get(LINE_HEADERS["colorway"]))
+        if not colorway:
+            continue
+        if colorway in line_by_colorway:
+            counters["duplicate_line_colorways"] += 1
+            issues.append({
+                "Severity": "Warning", "Type": "Duplicate Line List Colorway", "EAN": "", "Article": colorway,
+                "Detail": "The colorway occurs more than once in the Line List; the first row is used.",
+                "Recommended action": "Check whether the Line List export contains duplicate commercial records.",
+            })
+            continue
+        line_by_colorway[colorway] = row
 
     latest_change = _latest_by_date(changes, "Colorway Number", "Change Date")
     latest_date_change = _latest_by_date(date_changes, "Colorway Number", "Change Date")
@@ -1075,7 +1081,7 @@ def build_listing(
         oob_exceptions += 1
 
     # Add the separate Centric Brands In-line portfolio.  These rows never depend
-    # on OOB, generic UA Material Data or the UA Licensed List.  If an EAN happens
+    # on OOB, generic UA Material Data or any UA licensed-product records. If an EAN happens
     # to exist in the generic UA stream, Centric wins for that licensed product.
     existing_scope_by_ean = {norm(_scope_ean(record)): record for record in scope_records}
     for centric in centric_records:
@@ -1144,7 +1150,7 @@ def build_listing(
                 counters["missing_line"] += 1
                 issues.append({
                     "Severity": "Warning", "Type": "Missing Line List Data", "EAN": ean, "Article": article,
-                    "Detail": "Confirmed OOB EAN is outside the current Line List and Licensed List.",
+                    "Detail": "Confirmed OOB EAN is outside the current standard-UA Line List.",
                     "Recommended action": "Keep it as a confirmed exception; check whether it is a carryover, replacement, or discontinued SKU.",
                 })
 
@@ -1295,7 +1301,7 @@ def build_listing(
         "OOB input rows": len(raw_oob_rows),
         "OOB product rows": len(oob_rows),
         "OOB summary rows ignored": len(raw_oob_rows) - len(oob_rows),
-        "Current Line List colorways (incl. Licensed)": len(line_colorways),
+        "Current standard-UA Line List colorways": len(line_colorways),
         "Change Log DROP colorways removed from broad portfolio": len(dropped_from_current_line),
         "Change Log ADD colorways included outside current Line List (OOB confirmed)": len(added_with_material),
         "Change Log ADD colorways excluded because not present in OOB": len(add_colorways_without_oob),
