@@ -28,7 +28,7 @@ OUTPUT_HEADERS = [
     "Style", "Article", "SKU", "usdis", "Style Description", "Size UA",
     "Size US DIST.", "Size EUR", "Size Scale", "Selling Season", "EAN",
     "Product Division", "Gender Description", "Size Group Description", "End Use",
-    "Signature Collections", "Brand", "GHL", "Story Tier", "Fit Type",
+    "Signature Collections", "Brand", "GHL", "Fit Type",
     "Merch Department", "Class Description", "Sub Class Description", "Period",
     "Shipment Start Date", "Shipment End Date", "Launch Date", "Color Group",
     "Primary Color", "Secondary Color", "Logo Colorway", "Product Ranking", "C/O",
@@ -105,7 +105,6 @@ LINE_HEADERS = {
     "ship_start": "Shipment Start Date",
     "ship_end": "Shipment End Date",
     "period": "Period",
-    "storytier": "Storytier",
     "carryover_2": "Emeacarryoverseason2",
     "carryover_1": "Emeacarryoverseason1",
     "catalog_copy": "Product Catalog Copy",
@@ -1253,7 +1252,6 @@ def build_listing(
             # The current FW26 values are Q3/Q4 labels, but we intentionally use
             # non-empty as the rule to remain robust if UA changes the naming.
             "GHL": "ANO" if line and clean(line.get(LINE_HEADERS["hero_look_name"])) else "NE",
-            "Story Tier": clean(line.get(LINE_HEADERS["storytier"])) if line else "",
             "Fit Type": clean(line.get(LINE_HEADERS["fit"])) if line else "",
             "Merch Department": clean(material.get(MATERIAL_HEADERS["merch_department"])) if material else "",
             "Class Description": clean(material.get(MATERIAL_HEADERS["merch_class"])) if material else "",
