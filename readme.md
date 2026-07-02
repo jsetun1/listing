@@ -8,7 +8,7 @@ Aplikace vytváří jeden zákaznický listing kompletního **aktivního sezónn
 
 1. **OOB** – potvrzuje objednané standardní UA EANy. Neomezuje běžnou šíři sezonního listingu, ale je povinným potvrzením pro položky s posledním stavem `ADD` v Change Logu.
 2. **UA Material Data Report** – EANová, produktová a logistická master data standardních UA produktů.
-3. **EMEA Line List** včetně Licensed Listu – určuje, které standardní UA colorwaye jsou v sezoně aktivní.
+3. **EMEA Line List** – určuje, které standardní UA colorwaye jsou v sezoně aktivní. Záložka `Licensed List` se nepoužívá ani nevyžaduje; licencované produkty se berou výhradně z Centric Brands masterdat.
 4. **EMEA Line List Change Log** – aplikuje ADD/DROP a změny termínů na standardní UA portfolio.
 5. **Referenční listing / muster** – cílové sloupce a formát exportu; reference pro Size EUR a Size Scale.
 
@@ -24,7 +24,7 @@ Aplikace vytváří jeden zákaznický listing kompletního **aktivního sezónn
 
 ```text
 Finální listing
-= aktivní standardní UA portfolio z Line Listu
+= aktivní standardní UA portfolio pouze ze záložky Line List
 + Change Log ADD pouze tehdy, když je stejný style/colorway v OOB
 + OOB potvrzené UA EANové výjimky
 + Centric In-line underwear / boys underwear / kids outerwear / kids sportswear
@@ -32,7 +32,7 @@ Finální listing
 − Centric MFO
 ```
 
-Centric produkty nejsou závislé na OOB ani na UA Material Data Reportu. Pokud generic UA Material Data obsahuje stejný Centric article, Centric řádek jej nahradí, i když generic UA report uvádí jiný EAN, COO, FEDAS nebo materiál.
+Centric produkty nejsou závislé na OOB ani na UA Material Data Reportu. Záložka `Licensed List` se záměrně nečte, i když je v exportu přítomná. Pokud generic UA Material Data obsahuje stejný Centric article, Centric řádek jej nahradí, i když generic UA report uvádí jiný EAN, COO, FEDAS nebo materiál.
 
 ### Change Log ADD a OOB
 
@@ -48,6 +48,7 @@ Centric produkty nejsou závislé na OOB ani na UA Material Data Reportu. Pokud 
 - Standardní UA položky mají hodnotu `Under Armour`.
 - Licencované položky z Centric Brands — underwear, boys underwear, dětský outerwear a dětský sportswear — mají hodnotu `Centric Brand`.
 - Aplikace přijme jak nový Muster se sloupcem `Brand`, tak starší Muster se sloupcem `DTC exclusive`; výsledný export vždy použije `Brand`.
+- U licencovaných Centric položek se hodnota `KHQ Branded` ve sloupci **Product Division** automaticky normalizuje na `Apparel`. Ostatní division hodnoty Centric zůstávají beze změny.
 
 ## GHL (Global Hero Look)
 
