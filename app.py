@@ -30,7 +30,10 @@ with right:
     st.info(
         "Muster určuje cílové sloupce a formát. Používá se také jako reference pro "
         "Size UA → Size EUR a Size Scale standardního UA sortimentu. GHL se přebírá "
-        "z neprázdného pole Hero Look Name v Line Listu (ANO / NE). Sloupec Brand je Under Armour pro standardní UA sortiment a Centric Brand pro licencované Centric produkty. Change Log ADD se zařadí pouze při potvrzení v OOB."
+        "z neprázdného pole Hero Look Name v Line Listu (ANO / NE). Záložka Licensed List "
+        "se nepoužívá; licencované produkty se berou přímo z Centric Brands masterdat. "
+        "Sloupec Brand je Under Armour pro standardní UA sortiment a Centric Brand pro "
+        "licencované Centric produkty. Change Log ADD se zařadí pouze při potvrzení v OOB."
     )
 
 st.subheader("Centric Brands – licencované produkty")
