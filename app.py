@@ -29,7 +29,7 @@ with right:
     template_file = st.file_uploader("5. Referenční listing / muster", type=["xlsx"], key="template")
     st.info(
         "Muster určuje cílové sloupce a formát. Používá se také jako reference pro "
-        "Size UA → Size EUR a Size Scale standardního UA sortimentu. GHL se přebírá "
+        "Size UA → Size EUR a Size Scale standardního UA sortimentu. Storytier se nepoužívá. GHL se přebírá "
         "z neprázdného pole Hero Look Name v Line Listu (ANO / NE). Záložka Licensed List "
         "se nepoužívá; licencované produkty se berou přímo z Centric Brands masterdat. "
         "Sloupec Brand je Under Armour pro standardní UA sortiment a Centric Brand pro "
