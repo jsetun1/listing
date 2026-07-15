@@ -22,7 +22,7 @@ left, right = st.columns(2)
 with left:
     oob_file = st.file_uploader("1. OOB – objednané standardní UA položky", type=["xlsx"], key="oob")
     material_file = st.file_uploader("2. UA Material Data Report – complete", type=["xlsx"], key="material")
-    line_list_file = st.file_uploader("3. EMEA Line List", type=["xlsx"], key="line")
+    line_list_file = st.file_uploader("3. EMEA Line List – original file OK", type=["xlsx"], key="line")
 with right:
     change_log_file = st.file_uploader("4. EMEA Line List – Change Log", type=["xlsx"], key="changes")
     template_file = st.file_uploader("5. Referenční listing / muster", type=["xlsx"], key="template")
@@ -30,8 +30,9 @@ with right:
         "Muster určuje cílové sloupce a formát. Material Data Report se filtruje na "
         "Masterproductline = Inline a Article Status Desc = Active. Používá se také jako reference pro "
         "Size UA → Size EUR a Size Scale standardního UA sortimentu. Storytier se nepoužívá. GHL se přebírá "
-        "z neprázdného pole Hero Look Name v Line Listu (ANO / NE). Záložka Licensed List "
-        "se nepoužívá; licencované produkty se berou přímo z Centric Brands masterdat. "
+        "z neprázdného pole Hero Look Name v Line Listu (ANO / NE). V originálním EMEA Line Listu "
+        "se čtou pouze standardní řádky ze záložky Line List; záložky MFO a Licensed List se ignorují. "
+        "Licencované produkty se berou přímo z Centric Brands masterdat. "
         "Sloupec Brand je Under Armour pro standardní UA sortiment a Centric Brand pro "
         "licencované Centric produkty. Change Log ADD se zařadí pouze při potvrzení v OOB. "
         "Centric se nahrává jedním sloučeným souborem."
