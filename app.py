@@ -21,13 +21,14 @@ st.subheader("Standardní UA podklady")
 left, right = st.columns(2)
 with left:
     oob_file = st.file_uploader("1. OOB – objednané standardní UA položky", type=["xlsx"], key="oob")
-    material_file = st.file_uploader("2. UA Material Data Report", type=["xlsx"], key="material")
+    material_file = st.file_uploader("2. UA Material Data Report – complete", type=["xlsx"], key="material")
     line_list_file = st.file_uploader("3. EMEA Line List", type=["xlsx"], key="line")
 with right:
     change_log_file = st.file_uploader("4. EMEA Line List – Change Log", type=["xlsx"], key="changes")
     template_file = st.file_uploader("5. Referenční listing / muster", type=["xlsx"], key="template")
     st.info(
-        "Muster určuje cílové sloupce a formát. Používá se také jako reference pro "
+        "Muster určuje cílové sloupce a formát. Material Data Report se filtruje na "
+        "Masterproductline = Inline a Article Status Desc = Active. Používá se také jako reference pro "
         "Size UA → Size EUR a Size Scale standardního UA sortimentu. Storytier se nepoužívá. GHL se přebírá "
         "z neprázdného pole Hero Look Name v Line Listu (ANO / NE). Záložka Licensed List "
         "se nepoužívá; licencované produkty se berou přímo z Centric Brands masterdat. "
