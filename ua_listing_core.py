@@ -251,6 +251,7 @@ def _read_matching_sheet_from_xlsx(
     required_headers: Iterable[str],
     source_name: str,
     preferred_sheet_names: Iterable[str] = (),
+    ignored_sheet_names: Iterable[str] = (),
 ) -> tuple[list[dict[str, str]], str]:
     """Read the worksheet that actually contains the expected source columns.
 
@@ -259,10 +260,21 @@ def _read_matching_sheet_from_xlsx(
     by header structure first, while retaining the expected worksheet name as a
     preference when it exists. This keeps named sources such as Line List stable
     and makes generic one-sheet source workbooks resilient to harmless renames.
+
+    Some original UA files contain additional worksheets such as MFO or Licensed
+    List with a similar commercial layout. Those tabs are intentionally ignored
+    for the standard-UA listing scope when the caller supplies their names here.
     """
     sheet_names = _sheet_names_from_xlsx(file_bytes)
-    preferred = [name for name in preferred_sheet_names if name in sheet_names]
-    candidates = preferred + [name for name in sheet_names if name not in preferred]
+    ignored = {norm(name) for name in ignored_sheet_names}
+    preferred = [
+        name for name in preferred_sheet_names
+        if name in sheet_names and norm(name) not in ignored
+    ]
+    candidates = preferred + [
+        name for name in sheet_names
+        if name not in preferred and norm(name) not in ignored
+    ]
     expected = set(required_headers)
     details: list[str] = []
     for sheet_name in candidates:
@@ -272,10 +284,12 @@ def _read_matching_sheet_from_xlsx(
             return records, sheet_name
         details.append(f"{sheet_name} ({len(headers)} headers)")
     available = ", ".join(sheet_names) or "none"
+    ignored_text = ", ".join(ignored_sheet_names) if ignored_sheet_names else "none"
     missing = ", ".join(required_headers)
     raise ValueError(
         f"{source_name} does not contain a worksheet with the required columns. "
-        f"Available sheets: {available}. Expected headers include: {missing}."
+        f"Available sheets: {available}. Ignored sheets: {ignored_text}. "
+        f"Expected headers include: {missing}."
     )
 
 
@@ -959,7 +973,11 @@ def build_listing(
     raw_material_rows, _material_sheet_name = _read_matching_sheet_from_xlsx(
         material_bytes, MATERIAL_HEADERS.values(), "Material Data Report", preferred_sheet_names=("Sheet 1", "Sheet1")
     )
-    raw_line_rows = _read_sheet_from_xlsx(line_list_bytes, "Line List")
+    raw_line_rows, line_list_sheet_name = _read_matching_sheet_from_xlsx(
+        line_list_bytes, LINE_REQUIRED_HEADERS, "EMEA Line List",
+        preferred_sheet_names=("Line List",),
+        ignored_sheet_names=("MFO", "Licensed List", "Licensed", "Licenced List", "Licenced"),
+    )
     changes = _read_sheet_from_xlsx(changelog_bytes, "Adds-Drops")
     date_changes = _read_sheet_from_xlsx(changelog_bytes, "Date Changes")
     template_rows, _template_sheet_name = _read_template_listing_from_xlsx(template_bytes)
@@ -1475,6 +1493,8 @@ def build_listing(
         "Material Data rows used (Inline + Active)": len(material_rows),
         "Material Data rows excluded because not Inline": counters["material_excluded_non_inline"],
         "Material Data rows excluded because not Active": counters["material_excluded_non_active"],
+        "Line List sheet used": line_list_sheet_name,
+        "Ignored Line List sheets": "MFO; Licensed List",
         "Current standard-UA Line List colorways": len(line_colorways),
         "Change Log DROP colorways removed from broad portfolio": len(dropped_from_current_line),
         "Change Log ADD colorways included outside current Line List (OOB confirmed)": len(added_with_material),
