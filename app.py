@@ -14,8 +14,7 @@ with st.sidebar:
     st.header("Nastavení")
     season = st.text_input("Selling Season", value="FW26").strip().upper()
     st.caption(
-        "Centric: používají se pouze In-line produkty. Sheet "
-        "MFO_Underwear_Undershirts se vždy ignoruje."
+        "Centric: nahrává se jeden sloučený soubor s dostupnými licencovanými produkty."
     )
 
 st.subheader("Standardní UA podklady")
@@ -33,32 +32,26 @@ with right:
         "z neprázdného pole Hero Look Name v Line Listu (ANO / NE). Záložka Licensed List "
         "se nepoužívá; licencované produkty se berou přímo z Centric Brands masterdat. "
         "Sloupec Brand je Under Armour pro standardní UA sortiment a Centric Brand pro "
-        "licencované Centric produkty. Change Log ADD se zařadí pouze při potvrzení v OOB."
+        "licencované Centric produkty. Change Log ADD se zařadí pouze při potvrzení v OOB. "
+        "Centric se nahrává jedním sloučeným souborem."
     )
 
 st.subheader("Centric Brands – licencované produkty")
-centric_left, centric_right, centric_notes = st.columns([1, 1, 1])
+centric_left, centric_notes = st.columns([1, 1])
 with centric_left:
-    centric_underwear_file = st.file_uploader(
-        "6. Centric Underwear / Undershirts", type=["xlsx"], key="centric_underwear"
-    )
-with centric_right:
-    centric_outerwear_file = st.file_uploader(
-        "7. Centric Kids Outerwear – In Line", type=["xlsx"], key="centric_outerwear"
-    )
-    centric_sportswear_file = st.file_uploader(
-        "8. Centric Kids Sportswear – In Line", type=["xlsx"], key="centric_sportswear"
+    centric_combined_file = st.file_uploader(
+        "6. Centric consolidated listing data", type=["xlsx"], key="centric_combined"
     )
 with centric_notes:
     st.info(
-        "Centric master data má přednost před UA Material Data. "
-        "U kódů typu 25UJFJM07F-001-JPC se do listingu zapisuje "
-        "Style 25UJFJM07F a Article 25UJFJM07F-001; přípona -JPC zůstává jen v auditu."
+        "Centric se nově nahrává jako jeden sloučený soubor pro underwear, "
+        "kids outerwear a kids sportswear. Centric data mají přednost před UA Material Data; "
+        "sloupec Brand zůstává Centric Brand a Product Division KHQ Branded se ve výstupu převádí na Apparel."
     )
 
 files_ready = all([
     oob_file, material_file, line_list_file, change_log_file, template_file,
-    centric_underwear_file, centric_outerwear_file, centric_sportswear_file,
+    centric_combined_file,
 ])
 if st.button("Vytvořit kompletní sezónní listing", type="primary", disabled=not files_ready):
     with st.spinner("Sestavuji standardní UA portfolio, licenční portfolio Centric a audit…"):
@@ -69,9 +62,7 @@ if st.button("Vytvořit kompletní sezónní listing", type="primary", disabled=
                 line_list_file.getvalue(),
                 change_log_file.getvalue(),
                 template_file.getvalue(),
-                centric_underwear_file.getvalue(),
-                centric_outerwear_file.getvalue(),
-                centric_sportswear_file.getvalue(),
+                centric_combined_file.getvalue(),
                 season,
             )
         except Exception as error:
