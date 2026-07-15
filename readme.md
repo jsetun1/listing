@@ -119,3 +119,10 @@ The builder now identifies the OOB, UA Material Data Report and reference Muster
 by their column headers, not only by a generic worksheet label such as `Sheet1`.
 It therefore supports updated exports where the working sheet has been renamed
 (for example from `Sheet1` to `Sheet2`).
+
+
+## Update: originální EMEA Line List
+
+Aplikace může přijmout originální EMEA Line List i v případě, že obsahuje záložky `MFO` a `Licensed List`.
+Pro standardní UA portfolio se používá pouze záložka `Line List`; záložky `MFO` a `Licensed List` se ignorují.
+Licencované produkty se do finálního exportu přidávají pouze z konsolidovaného souboru Centric Brands.
