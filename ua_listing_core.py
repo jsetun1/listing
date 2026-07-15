@@ -62,6 +62,7 @@ MATERIAL_HEADERS = {
     "style_name": "Style Name",
     "size": "Article Size",
     "status": "Article Status Desc",
+    "master_product_line": "Masterproductline",
     "fedas": "Article Fedas Code",
     "fedas_size": "Article Fedas Size",
     "hts": "Article Site Commodity Code Import Code For Foreign Trade",
@@ -938,7 +939,8 @@ def build_listing(
          supplied only by the dedicated Centric Brands master-data files.
       2. Change Log applies DROP corrections; a latest-status ADD is included only
          if the same style/colorway is confirmed in OOB.
-      3. Material Data Report expands eligible colorways into individual EAN/size rows.
+      3. Material Data Report expands eligible colorways into individual EAN/size rows,
+         but only rows where Masterproductline = Inline and Article Status Desc = Active.
       4. OOB does not limit the UA portfolio. It marks confirmed items and retains an
          individual UA EAN when that confirmed EAN is outside the active master scope.
       5. The consolidated Centric Brands listing file is a separate licensed-product
@@ -946,8 +948,10 @@ def build_listing(
          Centric uploads for underwear, kids outerwear and kids sportswear.
 
     The result deliberately excludes standard-UA products that exist only in Material Data:
-    these are not necessarily available for EMEA FW26 ordering. Centric products are
-    included without relying on the UA Line List or OOB.
+    these are not necessarily available for EMEA FW26 ordering. Within the complete
+    UA Material Data Report, non-Inline and non-Active rows are ignored before
+    matching to Line List / Change Log. Centric products are included without
+    relying on the UA Line List or OOB.
     """
     raw_oob_rows, _oob_sheet_name = _read_matching_sheet_from_xlsx(
         oob_bytes, OOB_HEADERS.values(), "OOB", preferred_sheet_names=("Sheet1", "Sheet 1")
@@ -967,16 +971,29 @@ def build_listing(
     _require_headers(raw_oob_rows, OOB_HEADERS.values(), "OOB")
     _require_headers(raw_material_rows, MATERIAL_HEADERS.values(), "Material Data Report")
 
+    counters = Counter()
+
     # Some UA exports contain a trailing Excel "Grand Total" row. It is not a
     # product and must never turn into a fake EAN in the customer listing.
     oob_rows = [
         row for row in raw_oob_rows
         if not _is_summary_row(row, [OOB_HEADERS["ean"], OOB_HEADERS["article"]])
     ]
-    material_rows = [
+    material_rows_unfiltered = [
         row for row in raw_material_rows
         if not _is_summary_row(row, [MATERIAL_HEADERS["ean"], MATERIAL_HEADERS["article"]])
     ]
+    material_rows: list[dict[str, str]] = []
+    for row in material_rows_unfiltered:
+        master_line = norm(row.get(MATERIAL_HEADERS["master_product_line"]))
+        status = norm(row.get(MATERIAL_HEADERS["status"]))
+        if master_line != "INLINE":
+            counters["material_excluded_non_inline"] += 1
+            continue
+        if status != "ACTIVE":
+            counters["material_excluded_non_active"] += 1
+            continue
+        material_rows.append(row)
     line_rows = [
         row for row in raw_line_rows
         if not _is_summary_row(row, [LINE_HEADERS["colorway"]])
@@ -994,12 +1011,17 @@ def build_listing(
 
     reference = _reference_indexes(template_rows)
     issues: list[dict[str, str]] = []
-    counters = Counter()
     if LINE_HEADERS["hero_look_name"] not in line_rows[0]:
         issues.append({
             "Severity": "Review", "Type": "Line List Hero Look Name column missing", "EAN": "", "Article": "",
             "Detail": "The EMEA Line List does not contain the Hero Look Name column; all output GHL values default to NE.",
             "Recommended action": "Confirm whether Hero Look Name was removed or renamed before sending the customer listing.",
+        })
+    if not material_rows:
+        issues.append({
+            "Severity": "Warning", "Type": "Material Data filter returned no rows", "EAN": "", "Article": "",
+            "Detail": "After applying Masterproductline = Inline and Article Status Desc = Active, no Material Data rows remain.",
+            "Recommended action": "Check that the complete Material Data Report was uploaded and that the filter columns contain the expected values.",
         })
 
     # Centric data is authoritative for the licensed product stream. It is now
@@ -1449,6 +1471,10 @@ def build_listing(
         "OOB input rows": len(raw_oob_rows),
         "OOB product rows": len(oob_rows),
         "OOB summary rows ignored": len(raw_oob_rows) - len(oob_rows),
+        "Material Data product rows before Inline / Active filter": len(material_rows_unfiltered),
+        "Material Data rows used (Inline + Active)": len(material_rows),
+        "Material Data rows excluded because not Inline": counters["material_excluded_non_inline"],
+        "Material Data rows excluded because not Active": counters["material_excluded_non_active"],
         "Current standard-UA Line List colorways": len(line_colorways),
         "Change Log DROP colorways removed from broad portfolio": len(dropped_from_current_line),
         "Change Log ADD colorways included outside current Line List (OOB confirmed)": len(added_with_material),
