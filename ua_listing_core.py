@@ -766,15 +766,168 @@ def _centric_rows(
     return usable
 
 
+
+CENTRIC_COMBINED_REQUIRED_HEADERS = (
+    "Style", "Article", "Style Description", "Size UA", "EAN",
+    "Product Division", "Gender Description", "Size Group Description", "End Use", "Brand",
+)
+
+CENTRIC_COMBINED_RENAME = {
+    "Article Lenght": ("Article Lenght", "Article Lenght in cm", "Article Length in cm"),
+    "Article Width": ("Article Width", "Article Width in cm"),
+    "Article Height": ("Article Height", "Article Height in cm"),
+    "Volume": ("Volume", "Volume in L"),
+}
+
+
+def _combined_value(row: dict[str, str], header: str) -> str:
+    if header in CENTRIC_COMBINED_RENAME:
+        for candidate in CENTRIC_COMBINED_RENAME[header]:
+            value = clean(row.get(candidate))
+            if value:
+                return value
+        return ""
+    return clean(row.get(header))
+
+
+def _centric_source_from_listing_row(row: dict[str, str]) -> str:
+    end_use = norm(row.get("End Use"))
+    gender = norm(row.get("Gender Description"))
+    size_group = norm(row.get("Size Group Description"))
+    if "OUTER" in end_use:
+        return "Centric Outerwear In-line"
+    if "SPORT" in end_use:
+        return "Centric Sportswear In-line"
+    if "UNDER" in end_use and (size_group == "JUNIOR" or gender in {"BOYS", "GIRLS"}):
+        return "Centric Boys Underwear"
+    return "Centric Underwear In-line"
+
+
+def _normalise_product_division(value: str) -> str:
+    cleaned = clean(value)
+    return "Apparel" if norm(cleaned) == "KHQ BRANDED" else cleaned
+
+
+def _normalise_volume(value: str) -> str:
+    """Clean imported Centric litre volume values without inventing missing data."""
+    text = clean(value)
+    if not text:
+        return ""
+    # Excel can expose calculated decimals as long binary-looking strings.
+    try:
+        number = float(text.replace(",", "."))
+    except ValueError:
+        return text
+    if abs(number) < 1e-12:
+        return "0"
+    rounded = round(number, 4)
+    if float(rounded).is_integer():
+        return str(int(rounded))
+    return (f"{rounded:.4f}".rstrip("0").rstrip("."))
+
+
+def _centric_record_from_combined(row: dict[str, str], source: str) -> dict[str, str]:
+    article = _combined_value(row, "Article")
+    size = _combined_value(row, "Size UA")
+    style = _combined_value(row, "Style") or _style_from_article(article)
+    length = _combined_value(row, "Article Lenght")
+    width = _combined_value(row, "Article Width")
+    height = _combined_value(row, "Article Height")
+    volume = _normalise_volume(_combined_value(row, "Volume"))
+    listing_row: dict[str, str] = {header: _combined_value(row, header) for header in OUTPUT_HEADERS}
+    listing_row.update({
+        "Style": style,
+        "Article": article,
+        "SKU": _combined_value(row, "SKU") or (f"{article}-{size}" if article and size else article),
+        "usdis": _combined_value(row, "usdis") or (f"{article}-{size}" if article and size else article),
+        "Size UA": size,
+        "Size US DIST.": _combined_value(row, "Size US DIST.") or size,
+        "Selling Season": _combined_value(row, "Selling Season"),
+        "EAN": _combined_value(row, "EAN"),
+        "Product Division": _normalise_product_division(_combined_value(row, "Product Division")),
+        "Brand": "Centric Brand",
+        "GHL": _combined_value(row, "GHL") or "NE",
+        "Article Lenght": length,
+        "Article Width": width,
+        "Article Height": height,
+        "Volume": volume,
+        "Dimensions (cm)": _combined_value(row, "Dimensions (cm)") or _dimensions_cm_string(length, width, height),
+        "Dimensions (inch)": _combined_value(row, "Dimensions (inch)"),
+    })
+    return {
+        "style": style,
+        "article": article,
+        "ean": _combined_value(row, "EAN"),
+        "size": size,
+        "source": source,
+        "raw_material_number": _combined_value(row, "SKU") or _combined_value(row, "usdis") or article,
+        "description": _combined_value(row, "Style Description"),
+        "division": listing_row["Product Division"],
+        "gender": _combined_value(row, "Gender Description"),
+        "size_group": _combined_value(row, "Size Group Description"),
+        "end_use": _combined_value(row, "End Use"),
+        "season": _combined_value(row, "Selling Season"),
+        "color": _combined_value(row, "Primary Color") or _combined_value(row, "Color Group"),
+        "country": _combined_value(row, "COO COUNTRY"),
+        "hts": _combined_value(row, "HTS Code"),
+        "material": _combined_value(row, "Material"),
+        "fedas": _combined_value(row, "FEDAS Code"),
+        "fedas_size": _combined_value(row, "FEDAS Size Range"),
+        "listing_row": listing_row,
+    }
+
+
+def _centric_rows_from_combined(
+    records: list[dict[str, str]],
+    issues: list[dict[str, str]],
+    counters: Counter,
+) -> list[dict[str, str]]:
+    _require_headers(records, CENTRIC_COMBINED_REQUIRED_HEADERS, "Centric combined listing data")
+    usable: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in records:
+        if _is_summary_row(row, ["EAN", "Article"]):
+            continue
+        source = _centric_source_from_listing_row(row)
+        item = _centric_record_from_combined(row, source)
+        ean = norm(item["ean"])
+        if not _valid_ean(ean):
+            counters["centric_invalid_ean"] += 1
+            issues.append({
+                "Severity": "Review", "Type": "Centric row without valid EAN",
+                "EAN": clean(item["ean"]), "Article": item["article"],
+                "Detail": f"{source}: combined Centric listing row has EAN '{item['ean'] or '(blank)'}'.",
+                "Recommended action": "Do not send this product to customers until Centric supplies a numeric EAN/UPC.",
+            })
+            continue
+        if ean in seen:
+            counters["centric_duplicate_source_ean"] += 1
+            issues.append({
+                "Severity": "Warning", "Type": "Duplicate Centric EAN in combined source",
+                "EAN": item["ean"], "Article": item["article"],
+                "Detail": "The combined Centric file contains this EAN more than once. The first row is used.",
+                "Recommended action": "Check the Centric consolidated listing file for duplicate UPC/EAN assignments.",
+            })
+            continue
+        seen.add(ean)
+        if not item["country"]:
+            counters["centric_missing_coo"] += 1
+            issues.append({
+                "Severity": "Info", "Type": "Centric COO missing", "EAN": item["ean"], "Article": item["article"],
+                "Detail": f"{source}: COO COUNTRY is blank; output stays blank rather than borrowing data from UA Material Data.",
+                "Recommended action": "Request a refreshed Centric master-data file if COO is required by the customer.",
+            })
+        usable.append(item)
+    return usable
+
+
 def build_listing(
     oob_bytes: bytes,
     material_bytes: bytes,
     line_list_bytes: bytes,
     changelog_bytes: bytes,
     template_bytes: bytes,
-    centric_underwear_bytes: bytes,
-    centric_outerwear_bytes: bytes,
-    centric_sportswear_bytes: bytes,
+    centric_combined_bytes: bytes,
     season: str,
 ) -> tuple[list[dict[str, str]], dict[str, Any], list[dict[str, str]], list[dict[str, str]]]:
     """Build the complete active-season customer listing.
@@ -788,12 +941,13 @@ def build_listing(
       3. Material Data Report expands eligible colorways into individual EAN/size rows.
       4. OOB does not limit the UA portfolio. It marks confirmed items and retains an
          individual UA EAN when that confirmed EAN is outside the active master scope.
-      5. Centric Brands In-line files are a separate licensed-product stream and
-         are appended directly from their own master data. MFO underwear is excluded.
+      5. The consolidated Centric Brands listing file is a separate licensed-product
+         stream and is appended directly. It replaces the previous three separate
+         Centric uploads for underwear, kids outerwear and kids sportswear.
 
     The result deliberately excludes standard-UA products that exist only in Material Data:
-    these are not necessarily available for EMEA FW26 ordering. Centric In-line products
-    are included without relying on the UA Line List or OOB.
+    these are not necessarily available for EMEA FW26 ordering. Centric products are
+    included without relying on the UA Line List or OOB.
     """
     raw_oob_rows, _oob_sheet_name = _read_matching_sheet_from_xlsx(
         oob_bytes, OOB_HEADERS.values(), "OOB", preferred_sheet_names=("Sheet1", "Sheet 1")
@@ -805,13 +959,9 @@ def build_listing(
     changes = _read_sheet_from_xlsx(changelog_bytes, "Adds-Drops")
     date_changes = _read_sheet_from_xlsx(changelog_bytes, "Date Changes")
     template_rows, _template_sheet_name = _read_template_listing_from_xlsx(template_bytes)
-    centric_underwear_in_line = _read_sheet_from_xlsx(centric_underwear_bytes, "In_line Underwear_Undershirts")
-    centric_underwear_boys = _read_sheet_from_xlsx(centric_underwear_bytes, "Boys_Underwear")
-    centric_outerwear, _centric_outerwear_sheet_name = _read_first_nonempty_sheet_from_xlsx(
-        centric_outerwear_bytes, "Centric Kids Outerwear – In Line"
-    )
-    centric_sportswear, _centric_sportswear_sheet_name = _read_first_nonempty_sheet_from_xlsx(
-        centric_sportswear_bytes, "Centric Kids Sportswear – In Line"
+    centric_combined_rows, _centric_combined_sheet_name = _read_matching_sheet_from_xlsx(
+        centric_combined_bytes, CENTRIC_COMBINED_REQUIRED_HEADERS,
+        "Centric combined listing data", preferred_sheet_names=("Sheet1", "Sheet 1")
     )
 
     _require_headers(raw_oob_rows, OOB_HEADERS.values(), "OOB")
@@ -852,25 +1002,11 @@ def build_listing(
             "Recommended action": "Confirm whether Hero Look Name was removed or renamed before sending the customer listing.",
         })
 
-    # Centric data is authoritative for the licensed product stream.  Underwear
-    # deliberately excludes the MFO sheet; outerwear and sportswear use their In-line files.
-    centric_sources = (
-        (centric_underwear_in_line, "Centric Underwear In-line"),
-        (centric_underwear_boys, "Centric Boys Underwear"),
-        (centric_outerwear, "Centric Outerwear In-line"),
-        (centric_sportswear, "Centric Sportswear In-line"),
-    )
-    centric_authoritative_articles = {
-        norm(_centric_article_and_style(row)[0])
-        for records, _ in centric_sources
-        for row in records
-        if norm(row.get(CENTRIC_HEADERS["range"])) == "IN-LINE" and _centric_article_and_style(row)[0]
-    }
-    centric_records = [
-        item
-        for records, source_name in centric_sources
-        for item in _centric_rows(records, source_name, issues, counters)
-    ]
+    # Centric data is authoritative for the licensed product stream. It is now
+    # supplied as one consolidated listing-style workbook instead of three
+    # separate source files.
+    centric_records = _centric_rows_from_combined(centric_combined_rows, issues, counters)
+    centric_authoritative_articles = {norm(item["article"]) for item in centric_records if item.get("article")}
 
     # Index all potential EAN master data. Material Data can contain products that
     # are technically in the season but are not part of the sellable EMEA line.
@@ -1279,6 +1415,20 @@ def build_listing(
             "Material": clean(centric.get("material")) if centric else (clean(material.get(MATERIAL_HEADERS["material"])) if material else ""),
             "Tech Platform": clean(line.get(LINE_HEADERS["tech"])) if line else (clean(material.get(MATERIAL_HEADERS["tech"])) if material else ""),
         })
+        if centric and centric.get("listing_row"):
+            # Consolidated Centric files are already customer-listing data. Preserve
+            # their available fields, while still enforcing the current output
+            # column names and commercial flags.
+            centric_listing = centric["listing_row"]
+            for header in OUTPUT_HEADERS:
+                value = clean(centric_listing.get(header))
+                if value:
+                    row[header] = value
+            row["Product Division"] = _normalise_product_division(row.get("Product Division")) or "Apparel"
+            row["Brand"] = "Centric Brand"
+            row["GHL"] = row.get("GHL") or "NE"
+            if not row.get("Dimensions (cm)"):
+                row["Dimensions (cm)"] = _dimensions_cm_string(row.get("Article Lenght"), row.get("Article Width"), row.get("Article Height"))
         output_rows.append(row)
         scope_audit_rows.append({
             "EAN": ean,
@@ -1633,14 +1783,12 @@ def build_files(
     line_list_bytes: bytes,
     changelog_bytes: bytes,
     template_bytes: bytes,
-    centric_underwear_bytes: bytes,
-    centric_outerwear_bytes: bytes,
-    centric_sportswear_bytes: bytes,
+    centric_combined_bytes: bytes,
     season: str,
 ) -> tuple[bytes, bytes, dict[str, Any], list[dict[str, str]]]:
     rows, summary, issues, scope_rows = build_listing(
         oob_bytes, material_bytes, line_list_bytes, changelog_bytes, template_bytes,
-        centric_underwear_bytes, centric_outerwear_bytes, centric_sportswear_bytes, season
+        centric_combined_bytes, season
     )
     return (
         listing_xlsx_from_template(template_bytes, rows),
@@ -1655,9 +1803,7 @@ def build_from_paths(
     line_list_path: str | Path,
     changelog_path: str | Path,
     template_path: str | Path,
-    centric_underwear_path: str | Path,
-    centric_outerwear_path: str | Path,
-    centric_sportswear_path: str | Path,
+    centric_combined_path: str | Path,
     season: str,
 ) -> tuple[bytes, bytes, dict[str, Any], list[dict[str, str]]]:
     return build_files(
@@ -1666,8 +1812,6 @@ def build_from_paths(
         Path(line_list_path).read_bytes(),
         Path(changelog_path).read_bytes(),
         Path(template_path).read_bytes(),
-        Path(centric_underwear_path).read_bytes(),
-        Path(centric_outerwear_path).read_bytes(),
-        Path(centric_sportswear_path).read_bytes(),
+        Path(centric_combined_path).read_bytes(),
         season,
     )
